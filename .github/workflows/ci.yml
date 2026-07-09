@@ -60,11 +60,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
+      # No `version:` here on purpose — the pnpm version is pinned by the
+      # `packageManager` field in package.json. Specifying both makes
+      # action-setup fail with ERR_PNPM_BAD_PM_VERSION.
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "pnpm"

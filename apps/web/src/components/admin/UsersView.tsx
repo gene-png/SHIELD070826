@@ -72,7 +72,9 @@ export function UsersView(): JSX.Element {
       setClientId("");
       await reload();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to create user.");
+      setFormError(
+        err instanceof Error ? err.message : "Failed to create user.",
+      );
     } finally {
       setCreating(false);
     }
@@ -172,7 +174,10 @@ export function UsersView(): JSX.Element {
               <button
                 type="submit"
                 disabled={
-                  creating || !email.trim() || !name.trim() || password.length < 12
+                  creating ||
+                  !email.trim() ||
+                  !name.trim() ||
+                  password.length < 12
                 }
                 className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600 disabled:opacity-60"
               >
@@ -219,7 +224,10 @@ export function UsersView(): JSX.Element {
               </thead>
               <tbody>
                 {users.map((u) => (
-                  <tr key={u.id} className="border-b border-border-subtle last:border-b-0">
+                  <tr
+                    key={u.id}
+                    className="border-b border-border-subtle last:border-b-0"
+                  >
                     <td className="py-2 pr-4">
                       <div className="font-medium text-ink-primary">
                         {u.display_name ?? "—"}
@@ -227,7 +235,9 @@ export function UsersView(): JSX.Element {
                       <div className="text-xs text-ink-tertiary">{u.email}</div>
                     </td>
                     <td className="py-2 pr-4">
-                      <StatusPill tone={u.role === "admin" ? "info" : "neutral"}>
+                      <StatusPill
+                        tone={u.role === "admin" ? "info" : "neutral"}
+                      >
                         {u.role}
                       </StatusPill>
                     </td>

@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 
 from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
-from app.logging import get_logger
 from app.ai.llm import LLMClient
 from app.attack.analytics import compute as compute_heatmap
 from app.attack.catalog import (
@@ -43,6 +42,7 @@ from app.attack.exporters import render_xlsx as render_attack_xlsx
 from app.audit import audit
 from app.db.session import get_db
 from app.dependencies import current_client, current_user, require_role
+from app.logging import get_logger
 from app.models._common import utcnow
 from app.models.artifact import Artifact, ArtifactOrigin
 from app.models.attack_assessment import (

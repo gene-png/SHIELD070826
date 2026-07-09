@@ -16,7 +16,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
 from alembic import command
 from alembic.config import Config
 from app.models import AuditEntry, Client, User, UserRole
