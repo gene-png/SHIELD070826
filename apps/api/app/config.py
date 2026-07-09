@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     # LLM (Master Spec §4.4 - never hardcoded)
     shield_llm_provider: LLMProvider = "anthropic"
-    shield_llm_model: str = "claude-opus-4-7"
+    shield_llm_model: str = "claude-sonnet-5"
     shield_llm_mode: Literal["fixture", "live"] = "fixture"
     anthropic_api_key: str = ""
 

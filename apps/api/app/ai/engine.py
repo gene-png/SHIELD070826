@@ -35,6 +35,11 @@ class AIJob:
     # The `llm_calls.purpose` + fixture key. Defaults to `name`; tech_debt keeps
     # its historical "extract.capabilities" purpose for fixture compatibility.
     purpose: str | None = None
+    # Per-job provider overrides (FIX A-3). When None the provider falls back to
+    # its configured default model / max output. Set on high-volume structured
+    # jobs to pin a cheaper model with a smaller output cap.
+    model: str | None = None
+    max_tokens: int | None = None
 
     @property
     def call_purpose(self) -> str:
@@ -103,6 +108,8 @@ def run_job(
         prompt_version=job.prompt_version,
         client_org_name=client_org_name,
         name_hints=tuple(name_hints),
+        model=job.model,
+        max_tokens=job.max_tokens,
     )
     return JobResult(data=job.parser(response.content), llm_call=call_row)
 

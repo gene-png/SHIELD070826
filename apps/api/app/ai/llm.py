@@ -35,6 +35,11 @@ from app.models.llm_call import LLMCall, LLMCallMode, LLMCallStatus
 _log = get_logger(__name__)
 
 
+class LLMConfigurationError(RuntimeError):
+    """The LLM is misconfigured in a way that must fail at boot, not on first
+    call — e.g. live mode selected but the provider SDK cannot be imported."""
+
+
 class LLMResponse:
     """Provider response container. Token counts may be None if the provider
     didn't report them (fixture mode supplies them; some providers don't)."""
@@ -56,9 +61,19 @@ class LLMProvider(Protocol):
     name: str
     model: str
 
-    def complete(self, prompt: str, payload: dict[str, Any]) -> LLMResponse:
+    def complete(
+        self,
+        prompt: str,
+        payload: dict[str, Any],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
         """Run the prompt + payload through the provider. Synchronous; the
-        caller is on a Celery worker for anything that's not interactive."""
+        caller is on a Celery worker for anything that's not interactive.
+
+        `model` / `max_tokens` are per-call overrides; when None the provider
+        uses its configured default."""
         ...
 
 
@@ -83,7 +98,16 @@ class FixtureProvider:
     def register_static(self, purpose: str, response: LLMResponse) -> None:
         self.register(purpose, lambda _payload: response)
 
-    def complete(self, prompt: str, payload: dict[str, Any]) -> LLMResponse:
+    def complete(
+        self,
+        prompt: str,
+        payload: dict[str, Any],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        # Overrides are irrelevant to canned responses; accepted for protocol
+        # parity so a job's model/max_tokens don't change fixture behaviour.
         purpose = payload.get("__purpose__") or "default"
         if purpose not in self._fixtures and "default" not in self._fixtures:
             raise KeyError(
@@ -129,11 +153,25 @@ class AnthropicProvider:
             )
         return self._client
 
-    def complete(self, prompt: str, payload: dict[str, Any]) -> LLMResponse:
+    def complete(
+        self,
+        prompt: str,
+        payload: dict[str, Any],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
         client = self._ensure_client()
         # Payload is sent as JSON inside the user message. The redactor has
         # already run upstream, so this content is safe to egress.
         import json
+
+        # Per-job overrides fall back to the provider default. 128000 is the
+        # configured-default model's max output and gives the full ATT&CK map
+        # (~65K tokens even when terse) headroom so it never truncates mid-JSON;
+        # a job may pin a smaller cap (e.g. a chunked Haiku job under its 64K).
+        effective_model = model or self.model
+        effective_max_tokens = max_tokens or 128000
 
         # STREAM the response. A large job (e.g. the full 600+ technique MITRE
         # ATT&CK map) needs a big max_tokens, and a non-streaming request that
@@ -141,12 +179,11 @@ class AnthropicProvider:
         # non-streaming ceiling, and long-lived idle sockets get closed by the
         # server ("APIConnectionError: server disconnected"). Streaming keeps the
         # connection alive with continuous events and has no 10-minute cap, so a
-        # single large call completes reliably. 128000 is the model's max output
-        # and gives the full ATT&CK map (~65K tokens even when terse) headroom so
-        # it never truncates mid-JSON; smaller jobs stop at end_turn long before.
+        # single large call completes reliably; smaller jobs stop at end_turn
+        # long before the cap.
         with client.messages.stream(
-            model=self.model,
-            max_tokens=128000,
+            model=effective_model,
+            max_tokens=effective_max_tokens,
             messages=[
                 {
                     "role": "user",
@@ -190,6 +227,19 @@ class LLMClient:
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> LLMClient:
         s = settings or get_settings()
+        # In live mode the provider SDK is imported lazily on the first call
+        # (see AnthropicProvider._ensure_client), so a container missing the SDK
+        # would otherwise fail with a generic 500 on the first Run-AI click, not
+        # at boot. Verify the import eagerly and fail loudly, naming the package.
+        if s.shield_llm_mode == "live" and s.shield_llm_provider == "anthropic":
+            try:
+                import anthropic  # noqa: F401
+            except ImportError as exc:
+                raise LLMConfigurationError(
+                    "SHIELD_LLM_MODE=live but the 'anthropic' package cannot be "
+                    "imported. Install it (`pip install anthropic`; it is already "
+                    "declared in pyproject.toml) or set SHIELD_LLM_MODE=fixture."
+                ) from exc
         return cls(_build_provider(s), s)
 
     def invoke(
@@ -205,8 +255,13 @@ class LLMClient:
         redaction_mode: RedactionMode | None = None,
         client_org_name: str | None = None,
         name_hints: tuple[str, ...] = (),
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[LLMResponse, LLMCall]:
-        """Redact, write the llm_calls row, call the provider, finalize the row."""
+        """Redact, write the llm_calls row, call the provider, finalize the row.
+
+        `model` / `max_tokens` are per-job overrides forwarded to the provider;
+        None means the provider's configured default."""
         mode = redaction_mode or self._settings.shield_redaction_mode  # type: ignore[assignment]
         cleaned_payload, removed_counts = redact_payload(
             payload,
@@ -219,12 +274,18 @@ class LLMClient:
             LLMCallMode.FIXTURE if self._settings.shield_llm_mode == "fixture" else LLMCallMode.LIVE
         )
 
+        # Record the EFFECTIVE model actually used, not the provider default: a
+        # per-job override resolves the same way the provider resolves it
+        # (`model or default`). The per-tenant cost report reads this row, so it
+        # must be truthful about which model billed.
+        effective_model = model or self.provider.model
+
         row = LLMCall(
             service_id=service_id,
             purpose=purpose,
             prompt_version=prompt_version,
             provider=self.provider.name,
-            model=self.provider.model,
+            model=effective_model,
             mode=call_mode,
             status=LLMCallStatus.RUNNING,
             requested_by=requested_by,
@@ -240,7 +301,9 @@ class LLMClient:
 
         started = time.monotonic()
         try:
-            response = self.provider.complete(prompt, send_payload)
+            response = self.provider.complete(
+                prompt, send_payload, model=model, max_tokens=max_tokens
+            )
         except Exception as exc:  # noqa: BLE001 - boundary; log + record + re-raise
             row.status = LLMCallStatus.FAILED
             row.error_message = f"{type(exc).__name__}: {exc}"
@@ -267,7 +330,7 @@ class LLMClient:
             "llm_call_completed",
             purpose=purpose,
             provider=self.provider.name,
-            model=self.provider.model,
+            model=effective_model,
             mode=call_mode.value,
             duration_ms=row.duration_ms,
             redacted=removed_counts,
