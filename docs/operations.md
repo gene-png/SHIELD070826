@@ -10,22 +10,25 @@
 
 ## Runtime components
 
-| Component      | Image                                                         | Notes                                                                       |
-| -------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| api            | `infra/docker/api.Dockerfile` (least-privilege user, no sudo) | uvicorn + workers per `WEB_CONCURRENCY`                                     |
-| worker         | same image as `api`, different entry                          | Celery worker                                                               |
-| web            | `infra/docker/web.Dockerfile`                                 | Next.js standalone output                                                   |
-| db             | managed Postgres 16 (RDS / Azure Database for Postgres)       | KMS-encrypted at rest; PITR enabled                                         |
-| redis          | managed Redis 7 (ElastiCache / Azure Cache)                   | Multi-AZ                                                                    |
-| object storage | S3 + KMS or Azure Blob + KMS                                  | Versioning ON; bucket-level encryption; deny anonymous; tight bucket policy |
-| OIDC           | Keycloak (self-hosted) or federated to customer IdP           | Realm export checked into `infra/keycloak/`                                 |
-| secrets        | AWS Secrets Manager or Azure Key Vault                        | Bootstrapped via Terraform; rotated quarterly                               |
+| Component      | Image                                                   | Notes                                                                                                                                                     |
+| -------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| api            | `apps/api/Dockerfile` (least-privilege user, no sudo)   | uvicorn + workers per `WEB_CONCURRENCY`. AI extraction, exports, and notifications run **synchronously in-process** — there is no separate worker (D-015) |
+| web            | `apps/web/Dockerfile`                                   | Next.js standalone output                                                                                                                                 |
+| db             | managed Postgres 16 (RDS / Azure Database for Postgres) | KMS-encrypted at rest; PITR enabled                                                                                                                       |
+| redis          | managed Redis 7 (ElastiCache / Azure Cache)             | Multi-AZ                                                                                                                                                  |
+| object storage | S3 + KMS or Azure Blob + KMS                            | Versioning ON; bucket-level encryption; deny anonymous; tight bucket policy                                                                               |
+| OIDC           | Keycloak (self-hosted) or federated to customer IdP     | Realm export checked into `infra/keycloak/`                                                                                                               |
+| secrets        | AWS Secrets Manager or Azure Key Vault                  | Bootstrapped via Terraform; rotated quarterly                                                                                                             |
 
 ## Backups
 
-- Postgres: managed point-in-time recovery + nightly snapshot to a separate region.
-- Object storage: versioning + cross-region replication on the artifacts bucket.
-- Keycloak realm: weekly export to the artifacts bucket.
+An implemented, cloud-agnostic backup/restore pair ships under `infra/backup/` and is documented step-by-step in [`docs/runbooks/backup-restore.md`](runbooks/backup-restore.md):
+
+- `infra/backup/backup.sh` — `pg_dump` of Postgres plus an `mc mirror` of the artifacts bucket into a single timestamped directory.
+- `infra/backup/restore.sh` — restores the database and re-syncs the artifacts bucket.
+- `infra/backup/restore-drill.sh` — a self-contained restore drill that round-trips a seeded record + artifact against the compose stack (also wired into CI, non-blocking for its first sprint).
+
+In managed cloud production these are complemented by platform features: Postgres point-in-time recovery + nightly snapshot to a separate region; object-storage versioning + cross-region replication on the artifacts bucket; weekly Keycloak realm export. Encryption at rest is configured on the backup target (SSE-KMS / customer-managed key), noted in `backup.sh` — no KMS is bundled here.
 
 ## Key rotation
 
@@ -36,18 +39,15 @@
 ## Monitoring + alerting
 
 - Structured JSON logs to CloudWatch / Log Analytics.
-- Metrics: Prometheus exposition from `api`, `worker`, `web`.
+- Metrics: Prometheus exposition from `api` and `web` (there is no worker process).
 - Alerts: latency p95 > 1s; 5xx rate > 1%; queue depth > 1000; redactor failure (page immediately).
 
 ## Incident response
 
-Runbook templates under `docs/runbooks/`:
+Runbooks live under `docs/runbooks/`. Status today:
 
-- `incident-response.md`
-- `backup-restore.md`
-- `key-rotation.md`
-- `disaster-recovery.md`
-- `redactor-failure.md`
+- `backup-restore.md` — **written** (backup schedule, retention, restore procedure).
+- `incident-response.md`, `key-rotation.md`, `disaster-recovery.md`, `redactor-failure.md` — **planned, not yet written.**
 
 Each runbook lists: signal → triage steps → mitigation → post-incident actions.
 

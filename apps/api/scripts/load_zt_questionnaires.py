@@ -20,12 +20,19 @@ Run it from apps/api:
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
-from app.db.session import SessionLocal
-from app.models.questionnaire import Question
-from sqlalchemy import select
+# Make `app` and `scripts` importable when run directly as
+# `python scripts/load_zt_questionnaires.py` (the documented container command),
+# not only as `python -m scripts.load_zt_questionnaires`. Mirrors seed_demo.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts._common import PACKAGES, print_progress
+from app.db.session import SessionLocal  # noqa: E402
+from app.models.questionnaire import Question  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+
+from scripts._common import PACKAGES, print_progress  # noqa: E402
 
 LOADER = "zt_questionnaires"
 SOURCES = (

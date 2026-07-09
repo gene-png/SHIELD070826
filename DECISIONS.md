@@ -75,6 +75,14 @@ English only at v1.0. Build i18n-aware (no hardcoded strings; locale-keyed messa
 **Rationale:** Eugene confirmed recommended option. Avoids translation cost in v1 while preserving zero-rewrite extensibility.
 **Ref:** Master Spec §17 Q7.
 
+> **AMENDMENT (2026-07-09, H-4): i18n rescinded for v1 — English only.** The
+> original entry promised an i18n-aware build via `next-intl` (web) and
+> `babel`/`gettext`-style catalogs (API). This was never implemented:
+> `next-intl` is absent from `apps/web/package.json` and there are no message
+> catalogs. Per the July 9 decision, v1 is **English only** with no i18n
+> scaffolding; revisit (and pick a library) only when a client engagement
+> actually requires additional locales. Do not cite `next-intl` as present.
+
 ## D-010 — Repo layout: monorepo with pnpm workspaces + Python workspace
 
 **2026-05-19 · architecture**
@@ -131,7 +139,13 @@ Opening commit lands directly on `main`. Push is deferred until the dev containe
 **Rationale:** AI Prompt §3.9 prescribes "push frequently" but §3.3 forbids the agent from introducing its own credentials. Eugene will push when he attaches a PAT or SSH key to the container.
 **Ref:** AI Prompt §3.3, §3.9.
 
-## D-015 — Part F: harden and ship decisions
+## D-016 — Part F: harden and ship decisions
+
+> Renumbering note (2026-07-09, H-4): this entry was originally committed as a
+> second `D-015`, colliding with the multi-tenant decision above. Renumbered to
+> `D-016` (the next free number after the multi-tenant D-015 and D-014). Content
+> is unchanged; the "worker removed / AI is synchronous" record here is the
+> authoritative source for those facts.
 
 **2026-06-26 · F (harden)**
 
@@ -160,3 +174,39 @@ Opening commit lands directly on `main`. Push is deferred until the dev containe
   run under `pytest -m unit` in CI.
 
 **Ref:** Work Order Part F.
+
+## D-017 — Retract the unenforced auth "compensating controls"; defer to the MFA work package
+
+**2026-07-09 · auth (H-1)**
+
+Two session-security knobs — `shield_idle_timeout_seconds` and
+`shield_forced_reauth_seconds` (`apps/api/app/config.py:90-91`) — are loaded but
+referenced **nowhere in application code**; they enforce nothing. `/auth/refresh`
+(`apps/api/app/routes/auth.py:322-340`) re-issues a token pair via `_issue_pair()`
+with **no rotation and no revocation** — the old refresh token stays valid to
+expiry — and logout (`:348-359`) is audit-only. Despite this, `README.md` and
+`BUILD_REPORT.md` (OWASP A07) presented idle timeout + forced re-auth as active
+"compensating controls for deferred MFA."
+
+**Decision: RETRACT the claims; do NOT bolt on half-enforcement now.** For a
+FedRAMP-target platform, documented-but-fictional controls are worse than absent
+ones. Accordingly:
+
+1. `README.md`, `BUILD_REPORT.md` (A07), `docs/architecture.md`,
+   `infra/keycloak/README.md`, `.env.example`, and `docker-compose.yml` now state
+   plainly that idle timeout, forced re-auth, and refresh-token rotation are
+   **PLANNED, NOT PRESENT**. The dead env-var names were removed from `.env.example`
+   and the compose passthrough.
+2. Enforcement is deferred into the **MFA work package**. Its **first item** is
+   **refresh-token rotation + revocation** (rotate on every `/auth/refresh`, keep a
+   server-side revocation/denylist, invalidate on logout), followed by idle-timeout
+   and forced-reauth enforcement, then MFA + email verification.
+3. **No behaviour change** in this remediation. `app/config.py` still _defines_ the
+   two settings (owned by the API code agent, not touched here); they are now
+   documented as reserved/unimplemented. **Note for the lead:** if we want the dead
+   settings physically removed from `config.py`, that is an app-code change outside
+   this doc/security remediation's scope.
+
+**Rationale:** Truthful posture. The knobs cost nothing to keep as reserved names
+for the MFA package, but must never again be advertised as working controls.
+**Ref:** July 9 remediation (H-1); Master Spec §4.5; OWASP A07.

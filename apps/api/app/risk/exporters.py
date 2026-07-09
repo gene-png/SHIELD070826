@@ -180,6 +180,27 @@ def _legend_rows() -> list[list[str]]:
     return [[t.value.title(), cadence_for(t)] for t in RiskTier]
 
 
+def _matrix_grid(ctx: RiskExportContext) -> list[list[str]]:
+    """The 5x5 Likelihood x Impact count grid (rows = likelihood high->low, cols
+    = impact). Shared by the PDF and the DOCX so the two never disagree."""
+    matrix = matrix_counts(
+        [
+            (Likelihood(e.likelihood), Impact(e.impact))
+            for e in ctx.entries
+            if e.likelihood in Likelihood._value2member_map_
+            and e.impact in Impact._value2member_map_
+        ]
+    )
+    grid: list[list[str]] = [[""] + [im.value.title() for im in IMPACT_ORDER]]
+    for lk in reversed(LIKELIHOOD_ORDER):
+        row = [lk.value.replace("_", " ").title()]
+        for im in IMPACT_ORDER:
+            cell = next(c for c in matrix if c.likelihood == lk.value and c.impact == im.value)
+            row.append(str(cell.count))
+        grid.append(row)
+    return grid
+
+
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
@@ -240,23 +261,7 @@ def render_pdf(ctx: RiskExportContext) -> bytes:
         story.append(Paragraph(line, body))
 
     story.append(Paragraph("Likelihood x Impact matrix", h2))
-    matrix = matrix_counts(
-        [
-            (Likelihood(e.likelihood), Impact(e.impact))
-            for e in ctx.entries
-            if e.likelihood in Likelihood._value2member_map_
-            and e.impact in Impact._value2member_map_
-        ]
-    )
-    # Build a 5x5 grid of counts (rows = likelihood high->low, cols = impact).
-    grid: list[list] = [[""] + [im.value.title() for im in IMPACT_ORDER]]
-    for lk in reversed(LIKELIHOOD_ORDER):
-        row = [lk.value.replace("_", " ").title()]
-        for im in IMPACT_ORDER:
-            cell = next(c for c in matrix if c.likelihood == lk.value and c.impact == im.value)
-            row.append(str(cell.count))
-        grid.append(row)
-    story.append(_grid(grid, [1.1 * inch] + [0.9 * inch] * 5))
+    story.append(_grid(_matrix_grid(ctx), [1.1 * inch] + [0.9 * inch] * 5))
 
     story.append(Paragraph("Tier legend (review cadence)", h2))
     story.append(_grid([["Tier", "Suggested cadence"], *_legend_rows()], [1.2 * inch, 5.0 * inch]))
@@ -306,6 +311,13 @@ def render_docx(ctx: RiskExportContext) -> bytes:
 
     add_heading(doc, "Summary")
     add_paragraphs(doc, _summary_lines(ctx))
+
+    # B-7: the module docstring promises "the 5x5 matrix" for "PDF/Word" and the
+    # PDF renders it, but the DOCX did not. Port the same grid into Word so the
+    # two deliverables agree.
+    add_heading(doc, "Likelihood x Impact matrix")
+    matrix_grid = _matrix_grid(ctx)
+    add_table(doc, matrix_grid[0], matrix_grid[1:])
 
     add_heading(doc, "Tier legend (review cadence)")
     add_table(doc, ["Tier", "Suggested cadence"], _legend_rows())

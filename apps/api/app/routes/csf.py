@@ -1399,16 +1399,28 @@ def export_playbook(
 
     org = None if client.legal_name == "(pending intake)" else client.legal_name
     name = org or "Client"
-    base = f"CSF_Playbook_v{a.version}"
     on = utcnow().strftime("%Y-%m-%d")
+    today = utcnow().date()
     xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     pdf_mime = "application/pdf"
+
+    # FIX B-7: route the Playbook filenames through the §15.5 deliverable_filename
+    # convention (Company_Service{MMDDYY}[_vN].ext) like every other finalize
+    # flow, instead of raw f-strings that carried no company or date.
+    def _pb_name(service_slug: str, extension: str) -> str:
+        return deliverable_filename(
+            company=org,
+            service_slug=service_slug,
+            extension=extension,
+            day=today,
+            version=a.version,
+        )
 
     specs = [
         (
             "xlsx",
             "Data workbook (XLSX)",
-            f"{base}.xlsx",
+            _pb_name("CSF_Playbook", "xlsx"),
             xlsx_mime,
             csf_playbook_export.render_xlsx(
                 client_name=name,
@@ -1420,7 +1432,7 @@ def export_playbook(
         (
             "exec_pdf",
             "Executive briefing (PDF)",
-            f"{base}_Executive.pdf",
+            _pb_name("CSF_Playbook_Executive", "pdf"),
             pdf_mime,
             csf_playbook_export.render_exec_pdf(
                 client_name=name,
@@ -1432,7 +1444,7 @@ def export_playbook(
         (
             "exec_docx",
             "Executive briefing (Word)",
-            f"{base}_Executive.docx",
+            _pb_name("CSF_Playbook_Executive", "docx"),
             DOCX_MIME,
             csf_playbook_export.render_exec_docx(
                 client_name=name,
@@ -1444,7 +1456,7 @@ def export_playbook(
         (
             "full_pdf",
             "Full playbook (PDF)",
-            f"{base}_Full.pdf",
+            _pb_name("CSF_Playbook_Full", "pdf"),
             pdf_mime,
             csf_playbook_export.render_full_pdf(
                 client_name=name,
@@ -1456,7 +1468,7 @@ def export_playbook(
         (
             "full_docx",
             "Full playbook (Word)",
-            f"{base}_Full.docx",
+            _pb_name("CSF_Playbook_Full", "docx"),
             DOCX_MIME,
             csf_playbook_export.render_full_docx(
                 client_name=name,
@@ -1609,7 +1621,10 @@ def finalize_csf_deliverable(
     # line below prints the resolved tier so the document states its assumption.
     resolved = _client_target_tier(db, svc.id)
     target_tier = resolved if (resolved is not None and 1 <= resolved <= 4) else DEFAULT_TARGET_TIER
-    gap = analyze_gaps(tier_map, notes=notes_map, target_tier=target_tier)
+    # B-4: the XLSX Gap Plan sheet must carry the FULL gap list, not a top-20
+    # slice; top_n=None keeps every gap. The PDF/DOCX narratives slice to their
+    # own top-N and title it "Top N of <total>".
+    gap = analyze_gaps(tier_map, notes=notes_map, target_tier=target_tier, top_n=None)
 
     client_name = client.legal_name
     if client_name == "(pending intake)":

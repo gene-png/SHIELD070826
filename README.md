@@ -1,6 +1,6 @@
 # SHIELD by Kentro v2.0
 
-Enterprise cybersecurity assessment platform. Single-tenant per deployment, FedRAMP Moderate/High target, four-service engagement workflow:
+Enterprise cybersecurity assessment platform. Multi-tenant (many clients per deployment, isolated by `client_id`; see `DECISIONS.md` D-015), FedRAMP Moderate/High target, four-service engagement workflow:
 
 1. **Technical Debt Review** — capability inventory, overlap analysis, consolidation plan.
 2. **Zero Trust Assessment** — CISA ZTMM 2.0 and DoD ZTRA, scored per pillar with current/target maturity.
@@ -19,7 +19,8 @@ Enterprise cybersecurity assessment platform. Single-tenant per deployment, FedR
 apps/
   web/              Next.js 14 (App Router, TS strict, Tailwind, shadcn/ui)
   api/              FastAPI (Python 3.12) - REST API + OpenAPI
-  worker/           Celery worker (shares the apps/api image)
+  worker/           Empty placeholder (.gitkeep only). There is NO worker: AI
+                    runs synchronously inside the API. See DECISIONS.md D-015.
 packages/
   design-system/    Tailwind tokens + shadcn components + label maps + copy
   shared-types/     TS types generated from apps/api OpenAPI
@@ -50,7 +51,7 @@ All development happens inside the dev container. Nothing installs to the host.
 ### Option A - VS Code Dev Containers (recommended)
 
 1. Open the repo in VS Code with the **Dev Containers** extension installed.
-2. When prompted, **Reopen in Container**. VS Code builds the dev image and brings up all 8 compose services (db, redis, minio, keycloak, mailhog, api, worker, web).
+2. When prompted, **Reopen in Container**. VS Code builds the dev image and brings up the compose services (db, redis, minio, createbuckets, keycloak, mailhog, api, web). There is no worker service — AI runs synchronously in the API.
 3. Once VS Code attaches, run:
    ```bash
    cp .env.example .env
@@ -68,7 +69,7 @@ All development happens inside the dev container. Nothing installs to the host.
 ```bash
 cp .env.example .env
 docker compose up -d db redis minio keycloak mailhog
-docker compose up -d --build api worker
+docker compose up -d --build api
 docker compose run --service-ports --rm web bash scripts/dev-web.sh
 ```
 
@@ -87,19 +88,19 @@ docker compose run --service-ports --rm web bash scripts/dev-web.sh
 
 Every variable in [`.env.example`](.env.example) is required. Summary:
 
-| Group          | Vars                                                                                                                                           | Notes                                         |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| Runtime        | `ENVIRONMENT`, `LOG_LEVEL`                                                                                                                     |                                               |
-| Database       | `DATABASE_URL`                                                                                                                                 | Postgres 16, locked in Master Spec §2         |
-| Redis          | `REDIS_URL`                                                                                                                                    | Celery queue + ephemeral cache                |
-| Object storage | `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_KMS_KEY_ID`                                                              | MinIO in dev, S3+KMS in prod                  |
-| OIDC           | `KEYCLOAK_ISSUER`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD`                                      |                                               |
-| NextAuth       | `NEXTAUTH_URL`, `NEXTAUTH_SECRET`                                                                                                              | Generate secret with `openssl rand -hex 32`   |
-| LLM            | `SHIELD_LLM_PROVIDER`, `SHIELD_LLM_MODEL`, `SHIELD_LLM_MODE`, `ANTHROPIC_API_KEY`                                                              | `MODE=fixture` for offline tests              |
-| Feature flags  | `SHIELD_AUTH_REQUIRE_MFA`, `SHIELD_AUTH_REQUIRE_EMAIL_VERIFY`, `SHIELD_EMAIL_DELIVERY_ENABLED`                                                 | All `false` for v1                            |
-| Redaction      | `SHIELD_REDACTION_MODE`                                                                                                                        | `strict` in prod; `off` forbidden outside dev |
-| Sessions       | `JWT_ACCESS_TTL_SECONDS`, `JWT_REFRESH_TTL_SECONDS`, `SHIELD_ACCOUNT_LOCKOUT_*`, `SHIELD_IDLE_TIMEOUT_SECONDS`, `SHIELD_FORCED_REAUTH_SECONDS` | Compensating controls for deferred MFA        |
-| Mail           | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`                                                                                                          | MailHog locally                               |
+| Group          | Vars                                                                                                      | Notes                                                                                                                                              |
+| -------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime        | `ENVIRONMENT`, `LOG_LEVEL`                                                                                |                                                                                                                                                    |
+| Database       | `DATABASE_URL`                                                                                            | Postgres 16, locked in Master Spec §2                                                                                                              |
+| Redis          | `REDIS_URL`                                                                                               | Ephemeral cache + rate-limit buckets. No Celery/queue consumer today (AI is synchronous)                                                           |
+| Object storage | `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_KMS_KEY_ID`                         | MinIO in dev, S3+KMS in prod                                                                                                                       |
+| OIDC           | `KEYCLOAK_ISSUER`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD` |                                                                                                                                                    |
+| NextAuth       | `NEXTAUTH_URL`, `NEXTAUTH_SECRET`                                                                         | Generate secret with `openssl rand -hex 32`                                                                                                        |
+| LLM            | `SHIELD_LLM_PROVIDER`, `SHIELD_LLM_MODEL`, `SHIELD_LLM_MODE`, `ANTHROPIC_API_KEY`                         | `MODE=fixture` for offline tests                                                                                                                   |
+| Feature flags  | `SHIELD_AUTH_REQUIRE_MFA`, `SHIELD_AUTH_REQUIRE_EMAIL_VERIFY`, `SHIELD_EMAIL_DELIVERY_ENABLED`            | All `false` for v1                                                                                                                                 |
+| Redaction      | `SHIELD_REDACTION_MODE`                                                                                   | `strict` in prod; `off` forbidden outside dev                                                                                                      |
+| Sessions       | `JWT_ACCESS_TTL_SECONDS`, `JWT_REFRESH_TTL_SECONDS`, `SHIELD_ACCOUNT_LOCKOUT_*`                           | Enforced: short JWT TTLs + account lockout. Idle timeout, forced re-auth, and refresh-token rotation are PLANNED, NOT PRESENT (DECISIONS.md D-017) |
+| Mail           | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`                                                                     | MailHog locally                                                                                                                                    |
 
 ## Running tests
 
@@ -128,14 +129,14 @@ docker compose run --rm e2e pnpm a11y
 - [`docs/operations.md`](docs/operations.md) - deployment, monitoring, backup, key rotation
 - [`docs/admin-guide.md`](docs/admin-guide.md) - Kentro consultant guide (filled across phases)
 - [`docs/client-guide.md`](docs/client-guide.md) - client-facing guide (filled across phases)
-- [`docs/runbooks/`](docs/runbooks/) - incident, backup, key rotation, DR
+- [`docs/runbooks/backup-restore.md`](docs/runbooks/backup-restore.md) - backup schedule, retention, and restore procedure (the other runbooks — incident, key rotation, DR — are planned, not yet written)
 
 ## Risk acceptance log
 
 Per Master Spec §2, two risks are explicitly accepted for v1:
 
 1. **Commercial LLM provider may not be FedRAMP-authorized.** Egress may leave the FedRAMP boundary. Mandatory PII redaction (`apps/api/app/ai/redact.py`) is the primary control. See [`docs/security.md`](docs/security.md).
-2. **MFA and email verification deferred for v1.** Compensating controls: 15-minute JWT lifetime, 30-minute idle timeout, daily forced re-auth, account lockout after 10 failed attempts in 15 minutes. Feature flags (`SHIELD_AUTH_REQUIRE_MFA`, `SHIELD_AUTH_REQUIRE_EMAIL_VERIFY`) enable both in v1.x with no code changes.
+2. **MFA and email verification deferred for v1.** The controls that are actually **enforced** today are the 15-minute JWT access-token lifetime and account lockout (10 failed attempts in 15 minutes). Idle timeout, daily forced re-auth, and refresh-token rotation/revocation are **PLANNED, NOT PRESENT** — `/auth/refresh` currently re-issues a token pair with no rotation and no revocation, and logout is audit-only. These, plus MFA and email verification, are scheduled into the MFA work package; refresh-token rotation + revocation is its first item (see `DECISIONS.md` D-017). Feature flags (`SHIELD_AUTH_REQUIRE_MFA`, `SHIELD_AUTH_REQUIRE_EMAIL_VERIFY`) are present but gate no enforced behavior yet.
 
 ## License
 

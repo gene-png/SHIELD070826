@@ -16,10 +16,16 @@ from typing import TYPE_CHECKING
 from app.models.zt_assessment import ZtAnswer, ZtAssessment
 from app.zt.catalog import capabilities, pillars
 from app.zt.maturity import ZtFrameworkCode, stage_label
-from app.zt.scoring import GapAnalysis, ScoreResult
+from app.zt.scoring import GapAnalysis, RoadmapItem, ScoreResult
 
 if TYPE_CHECKING:
     from reportlab.platypus import TableStyle
+
+# The PDF/DOCX narratives print only the top slice of the (possibly much longer)
+# gap list; the full list lives in the XLSX Gap Plan sheet. The heading states
+# "Top N of <total_gap_count>" so the executive summary can never silently
+# contradict the true gap count (B-4).
+NARRATIVE_GAP_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,7 @@ class ZtDeliverableContext:
     answers: list[ZtAnswer]
     score: ScoreResult
     gap: GapAnalysis
+    roadmap: tuple[RoadmapItem, ...] = ()
 
 
 def build_context(
@@ -42,6 +49,7 @@ def build_context(
     answers: Iterable[ZtAnswer],
     score: ScoreResult,
     gap: GapAnalysis,
+    roadmap: Iterable[RoadmapItem] = (),
 ) -> ZtDeliverableContext:
     return ZtDeliverableContext(
         client_legal_name=client_legal_name or "Client",
@@ -51,6 +59,7 @@ def build_context(
         answers=list(answers),
         score=score,
         gap=gap,
+        roadmap=tuple(roadmap),
     )
 
 
@@ -185,6 +194,29 @@ def render_xlsx(ctx: ZtDeliverableContext) -> bytes:
         ws3.cell(row=2, column=3).font = italic
     for w, col in zip([18, 10, 36, 14, 14, 12, 12, 50], range(1, 9), strict=True):
         ws3.column_dimensions[get_column_letter(col)].width = w
+
+    # --- Roadmap (B-5) ---
+    # Only render when a roadmap was supplied (build_roadmap over the gap list).
+    if ctx.roadmap:
+        ws4 = wb.create_sheet("Roadmap")
+        headers4 = ["Month", "Capability", "Pillar", "From stage", "To stage"]
+        ws4.append(headers4)
+        for col in range(1, len(headers4) + 1):
+            cell = ws4.cell(row=1, column=col)
+            cell.font = bold
+            cell.fill = header_fill
+        for it in ctx.roadmap:
+            ws4.append(
+                [
+                    it.month,
+                    f"{it.code} · {it.name}",
+                    it.pillar_code,
+                    it.current_stage,
+                    it.target_stage,
+                ]
+            )
+        for w, col in zip([10, 46, 10, 12, 12], range(1, 6), strict=True):
+            ws4.column_dimensions[get_column_letter(col)].width = w
 
     out = io.BytesIO()
     wb.save(out)
@@ -463,13 +495,26 @@ def render_docx(ctx: ZtDeliverableContext) -> bytes:
         ],
     )
 
-    add_heading(doc, f"Top remediation gaps (target S{ctx.gap.target_stage})")
-    if not ctx.gap.gaps:
+    shown = ctx.gap.gaps[:NARRATIVE_GAP_LIMIT]
+    total = ctx.gap.total_gap_count
+    add_heading(
+        doc,
+        f"Top {len(shown)} of {total} remediation gaps (target S{ctx.gap.target_stage})",
+    )
+    if not shown:
         add_paragraphs(
             doc,
             [f"No gaps at target stage {ctx.gap.target_stage} " f"({ctx.gap.target_label})."],
         )
     else:
+        if total > len(shown):
+            add_paragraphs(
+                doc,
+                [
+                    "See the Gap Plan sheet of the accompanying XLSX workbook for the "
+                    f"full list of all {total} remediation gaps.",
+                ],
+            )
         add_table(
             doc,
             ["Code", "Pillar", "Capability", "Current → Target", "Priority"],
@@ -481,9 +526,38 @@ def render_docx(ctx: ZtDeliverableContext) -> bytes:
                     f"S{g.current_stage} → S{g.target_stage}",
                     f"{g.priority_score:.2f}",
                 ]
-                for g in ctx.gap.gaps
+                for g in shown
             ],
         )
+
+    # Remediation roadmap (B-5): sequence the prioritized gaps across the horizon.
+    if ctx.roadmap:
+        add_heading(doc, "Remediation roadmap")
+        add_table(
+            doc,
+            ["Month", "Capability", "Pillar", "From → To"],
+            [
+                [
+                    it.month,
+                    f"{it.code} · {it.name}",
+                    it.pillar_code,
+                    f"S{it.current_stage} → S{it.target_stage}",
+                ]
+                for it in ctx.roadmap
+            ],
+        )
+
+    # Answers (B-5): the completed questionnaire, mirroring the XLSX Answers sheet.
+    add_heading(doc, "Answers")
+    answers_by_code = {a.capability_code: a for a in ctx.answers}
+    answer_rows: list[list] = []
+    for cap in capabilities(ctx.framework):
+        ans = answers_by_code.get(cap.code)
+        s = ans.maturity_stage if ans else None
+        notes = (ans.notes if ans else None) or ""
+        stage_cell = f"S{s} · {stage_label(s, ctx.framework)}" if s is not None else "Unscored"
+        answer_rows.append([f"{cap.code} · {cap.name}", stage_cell, notes])
+    add_table(doc, ["Capability", "Stage", "Notes"], answer_rows)
 
     return to_bytes(doc)
 
@@ -554,8 +628,15 @@ def render_pdf(ctx: ZtDeliverableContext) -> bytes:
 
     story.append(PageBreak())
 
-    story.append(Paragraph(f"Top remediation gaps (target S{ctx.gap.target_stage})", h2))
-    if not ctx.gap.gaps:
+    shown = ctx.gap.gaps[:NARRATIVE_GAP_LIMIT]
+    total = ctx.gap.total_gap_count
+    story.append(
+        Paragraph(
+            f"Top {len(shown)} of {total} remediation gaps (target S{ctx.gap.target_stage})",
+            h2,
+        )
+    )
+    if not shown:
         story.append(
             Paragraph(
                 f"No gaps at target stage {ctx.gap.target_stage} " f"({ctx.gap.target_label}).",
@@ -563,10 +644,18 @@ def render_pdf(ctx: ZtDeliverableContext) -> bytes:
             )
         )
     else:
+        if total > len(shown):
+            story.append(
+                Paragraph(
+                    "See the Gap Plan sheet of the accompanying XLSX workbook for the "
+                    f"full list of all {total} remediation gaps.",
+                    body,
+                )
+            )
         gap_table_data: list[list] = [
             ["Code", "Pillar", "Capability", "Current → Target", "Priority"]
         ]
-        for g in ctx.gap.gaps:
+        for g in shown:
             gap_table_data.append(
                 [
                     g.code,
@@ -583,6 +672,27 @@ def render_pdf(ctx: ZtDeliverableContext) -> bytes:
         )
         gap_table.setStyle(_table_style())
         story.append(gap_table)
+
+    # Remediation roadmap (B-5): the prioritized gaps sequenced across the horizon.
+    if ctx.roadmap:
+        story.append(Paragraph("Remediation roadmap", h2))
+        roadmap_data: list[list] = [["Month", "Capability", "Pillar", "Current → Target"]]
+        for it in ctx.roadmap:
+            roadmap_data.append(
+                [
+                    str(it.month),
+                    f"{it.code} · {it.name}",
+                    it.pillar_code,
+                    f"S{it.current_stage} → S{it.target_stage}",
+                ]
+            )
+        roadmap_table = Table(
+            roadmap_data,
+            colWidths=[0.7 * inch, 3.4 * inch, 0.8 * inch, 1.4 * inch],
+            repeatRows=1,
+        )
+        roadmap_table.setStyle(_table_style())
+        story.append(roadmap_table)
 
     doc.build(story)
     return out.getvalue()

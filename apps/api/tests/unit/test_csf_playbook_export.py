@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -147,3 +148,65 @@ def test_playbook_export_blocked_until_scored_and_approved(app_client) -> None:
                 if val == "L3":
                     seen_level_cell = True
     assert seen_level_cell, "expected scored L3 level cells in the workbook"
+
+
+@pytest.mark.unit
+def test_playbook_export_filenames_follow_deliverable_convention(app_client) -> None:
+    """FIX B-7: the Playbook export filenames route through the §15.5
+    deliverable_filename convention (Company_Service{MMDDYY}[_vN].ext) like every
+    other finalize flow, not raw f-strings ("CSF_Playbook_v1.xlsx") with no
+    company and no date."""
+    from datetime import datetime
+
+    from app.tech_debt.filename import deliverable_filename
+
+    c, cid = app_client
+    r = register_admin_resp(c, "admin@example.com")
+    h = {"Authorization": f"Bearer {r.json()['tokens']['access_token']}"}
+    svc_id = c.post("/csf/services", headers=h, json={"kind": "nist_csf", "title": "CSF"}).json()[
+        "id"
+    ]
+    assessment = c.post(f"/csf/services/{svc_id}/assessments", headers=h).json()
+    c.post(f"/csf/services/{svc_id}/profiles/seed", headers=h, json={"tiers": ["high"]})
+    _score_all(c, h, svc_id, "high")
+    c.post(f"/csf/assessments/{assessment['id']}/approve", headers=h)
+    ex = c.post(f"/csf/services/{svc_id}/playbook/export", headers=h)
+    assert ex.status_code == 200, ex.text
+
+    filenames = {a["kind"]: a["filename"] for a in ex.json()["artifacts"]}
+    today = datetime.now(UTC).date()
+    company = "Test Tenant"  # the fixture's tenant legal_name
+    expected = {
+        "xlsx": deliverable_filename(
+            company=company, service_slug="CSF_Playbook", extension="xlsx", day=today, version=1
+        ),
+        "exec_pdf": deliverable_filename(
+            company=company,
+            service_slug="CSF_Playbook_Executive",
+            extension="pdf",
+            day=today,
+            version=1,
+        ),
+        "exec_docx": deliverable_filename(
+            company=company,
+            service_slug="CSF_Playbook_Executive",
+            extension="docx",
+            day=today,
+            version=1,
+        ),
+        "full_pdf": deliverable_filename(
+            company=company,
+            service_slug="CSF_Playbook_Full",
+            extension="pdf",
+            day=today,
+            version=1,
+        ),
+        "full_docx": deliverable_filename(
+            company=company,
+            service_slug="CSF_Playbook_Full",
+            extension="docx",
+            day=today,
+            version=1,
+        ),
+    }
+    assert filenames == expected

@@ -118,13 +118,6 @@ export interface QuestionnaireDefinition {
 }
 
 export type ResponseValue =
-  | string
-  | number
-  | string[]
-  | boolean
-  | "yes"
-  | "no"
-  | "n_a"
-  | null;
+  string | number | string[] | boolean | "yes" | "no" | "n_a" | null;
 
 export type Responses = Record<string, ResponseValue>;

@@ -22,9 +22,9 @@
 ## Daily workflow
 
 ```bash
-# Bring the stack up
+# Bring the stack up (there is no worker service — AI runs synchronously in api)
 docker compose up -d db redis minio keycloak mailhog
-docker compose up -d --build api worker
+docker compose up -d --build api
 
 # Start the web dev server (inside the web container)
 docker compose exec web bash scripts/dev-web.sh
@@ -37,6 +37,28 @@ docker compose exec api pytest -m unit
 docker compose exec api pytest -m integration
 docker compose exec web pnpm test
 ```
+
+## Seeding data
+
+The api image does not bake in the questionnaire JSON (it lives in `packages/`),
+so `packages/` is mounted read-only into the api container and the loaders
+resolve it via `SHIELD_SEED_DATA_DIR` (defaults to `/app/packages`). Bring up the
+minimal stack first, then seed:
+
+```bash
+docker compose up -d db redis minio createbuckets api
+
+# One shot: demo tenant + both questionnaire loaders (all idempotent)
+bash scripts/seed.sh
+
+# ...or run them individually inside the api container:
+docker compose exec -T api python scripts/seed_demo.py
+docker compose exec -T api python scripts/load_zt_questionnaires.py
+docker compose exec -T api python scripts/load_csf_tier_questionnaires.py
+```
+
+Demo logins after `seed_demo`: `admin@kentro.example` / `client@atlas.example`,
+password `DemoPass!2026`.
 
 ## Commit discipline
 

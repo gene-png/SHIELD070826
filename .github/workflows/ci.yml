@@ -137,6 +137,28 @@ jobs:
         if: always()
         run: docker compose --profile test down -v
 
+  restore-drill:
+    name: Restore drill (backup/restore round-trip)
+    runs-on: ubuntu-latest
+    # Non-blocking for its first sprint, like the e2e job: a harness hiccup must
+    # not wedge remediation PRs. Flip to blocking once it has run green for a
+    # full sprint. Proves infra/backup/{backup,restore}.sh actually round-trip a
+    # seeded record + artifact against the compose stack, using a scratch DB and
+    # scratch bucket (never the real volumes).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bring up db + minio
+        run: docker compose up -d --wait db minio
+
+      - name: Run restore drill
+        run: bash infra/backup/restore-drill.sh
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

@@ -84,8 +84,7 @@ export async function exportRiskRegister(cid: string): Promise<RiskRegister> {
 export function describeRiskError(err: unknown): string {
   if (err instanceof RiskProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??

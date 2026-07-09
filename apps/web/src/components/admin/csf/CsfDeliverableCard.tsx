@@ -33,8 +33,7 @@ function fmtTime(value: string | null): string {
 function describeError(err: unknown): string {
   if (err instanceof CsfProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??

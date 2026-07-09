@@ -8,11 +8,7 @@ export type ServiceKind =
   | "attack_coverage";
 
 export type ServiceStatus =
-  | "draft"
-  | "in_progress"
-  | "review"
-  | "released"
-  | "archived";
+  "draft" | "in_progress" | "review" | "released" | "archived";
 
 export type CapabilityListStatus = "draft" | "approved" | "released";
 

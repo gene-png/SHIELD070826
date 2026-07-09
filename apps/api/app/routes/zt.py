@@ -1212,13 +1212,20 @@ def finalize_zt_deliverable(
     # targets + the client's engagement-level goal) so the signed deliverable
     # can never contradict the gap count the consultant reviewed on screen.
     target_stage, targets = _resolve_gap_targets(db, svc.id, answers, valid)
+    # B-4: the XLSX Gap Plan sheet must carry the FULL gap list, not a top-20
+    # slice. top_n=None keeps every gap; the PDF/DOCX narratives slice to their
+    # own top-N and title it "Top N of <total>".
     gap = analyze_gaps(
         cat_fw,
         stage_map,
         notes=notes_map,
         target_stage=target_stage,
         targets=targets,
+        top_n=None,
     )
+    # B-5: sequence the prioritized gaps into a remediation roadmap so the
+    # executive deliverable carries the roadmap the spec promises.
+    roadmap = build_roadmap(gap.gaps)
 
     client_name = client.legal_name
     if client_name == "(pending intake)":
@@ -1266,6 +1273,7 @@ def finalize_zt_deliverable(
         answers=answers,
         score=score,
         gap=gap,
+        roadmap=roadmap,
     )
     pdf_bytes = render_zt_pdf(ctx)
     xlsx_bytes = render_zt_xlsx(ctx)

@@ -111,9 +111,11 @@ def test_finalize_honors_client_target_tier(app_client) -> None:
     # Workspace/dashboard gap list at the client's real target (T4).
     ga = c.get(f"/csf/services/{svc_id}/gap-analysis?target_tier=4", headers=h).json()
     assert ga["target_tier"] == 4
-    assert ga["total_gap_count"] > 0
-    workspace_gap_rows = len(ga["gaps"])
-    assert workspace_gap_rows > 0
+    # The dashboard caps its returned `gaps` at top_n (20); `total_gap_count` is
+    # the true count. B-4 makes the finalized XLSX carry the FULL list, so we
+    # compare the export against the true total, not the capped dashboard slice.
+    workspace_total = ga["total_gap_count"]
+    assert workspace_total > 0
 
     fin = c.post(f"/csf/services/{svc_id}/deliverables/finalize", headers=h)
     assert fin.status_code == 201, fin.text
@@ -127,9 +129,9 @@ def test_finalize_honors_client_target_tier(app_client) -> None:
     gap_ws = wb["Gap Plan"]
     xlsx_gap_rows = gap_ws.max_row - 1  # minus the header row
 
-    # The exported Gap Plan matches the workspace gap list (same target tier) and
-    # is non-zero. With the pre-fix code (target hardcoded to T3, all rows at T3)
-    # there are ZERO gaps, so the exported sheet carries a single "No gaps"
-    # placeholder row instead — a mismatch this assertion catches.
-    assert xlsx_gap_rows == workspace_gap_rows
+    # The exported Gap Plan carries the FULL gap list at the resolved target tier
+    # (B-4), so it equals total_gap_count and is non-zero. With the pre-B-2 code
+    # (target hardcoded to T3, all rows at T3) there are ZERO gaps, so the sheet
+    # would carry a single "No gaps" placeholder row instead.
+    assert xlsx_gap_rows == workspace_total
     assert xlsx_gap_rows > 0

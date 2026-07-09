@@ -29,8 +29,13 @@ x-api-env: &api-env
   JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-1800}
   SHIELD_ACCOUNT_LOCKOUT_MAX_ATTEMPTS: ${SHIELD_ACCOUNT_LOCKOUT_MAX_ATTEMPTS:-10}
   SHIELD_ACCOUNT_LOCKOUT_WINDOW_SECONDS: ${SHIELD_ACCOUNT_LOCKOUT_WINDOW_SECONDS:-900}
-  SHIELD_IDLE_TIMEOUT_SECONDS: ${SHIELD_IDLE_TIMEOUT_SECONDS:-1800}
-  SHIELD_FORCED_REAUTH_SECONDS: ${SHIELD_FORCED_REAUTH_SECONDS:-86400}
+  # NOTE (H-1): idle-timeout and forced-reauth session knobs were removed from
+  # this passthrough. They are loaded by app/config.py but NOT enforced anywhere
+  # in app code (planned, not present); carrying them here misrepresented them as
+  # active controls. Deferred to the MFA work package -- see DECISIONS.md D-017.
+  # Seed loaders read their JSON data from here (E-6). Points at the
+  # read-only `packages/` mount below; falls back to the repo layout off-container.
+  SHIELD_SEED_DATA_DIR: ${SHIELD_SEED_DATA_DIR:-/app/packages}
   SMTP_HOST: ${SMTP_HOST:-mailhog}
   SMTP_PORT: ${SMTP_PORT:-1025}
   SMTP_FROM: ${SMTP_FROM:-no-reply@shield.local}
@@ -158,6 +163,10 @@ services:
       - "8000:8000"
     volumes:
       - ./apps/api:/app
+      # Seed data (questionnaire JSON) lives in packages/ and is NOT part of the
+      # api build context, so mount it read-only (E-6). Mirrors the web service,
+      # which already mounts ./packages. Loaders resolve it via SHIELD_SEED_DATA_DIR.
+      - ./packages:/app/packages:ro
     # Apply pending migrations before serving so a newly-added revision can't
     # leave the persistent db volume behind the (hot-reloaded) model code.
     # Dev convenience only - in prod, migrations run as a discrete deploy step,

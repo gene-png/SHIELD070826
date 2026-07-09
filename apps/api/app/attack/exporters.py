@@ -68,6 +68,45 @@ def _tactic_name(tactic_id: str) -> str:
     return tactic_id
 
 
+# --- Remediation priority ordering (B-7) --------------------------------------
+# The old narrative "top remediation gaps" list filtered to GAP, sorted
+# ALPHABETICALLY by technique code, and cut at 50 -- alphabetical order is not a
+# priority by any measure. We now surface both GAP and PARTIAL techniques (both
+# need work) ordered by a defensible priority: the weakest tactic coverage a
+# technique touches first, then GAP before PARTIAL, then code as a stable
+# tie-break. The section title states the rule so the document explains itself.
+_REMEDIATION_STATUSES = (CoverageStatus.GAP.value, CoverageStatus.PARTIAL.value)
+_STATUS_RANK = {CoverageStatus.GAP.value: 0, CoverageStatus.PARTIAL.value: 1}
+_REMEDIATION_LIMIT = 50
+REMEDIATION_SECTION_TITLE = (
+    "Remediation priorities (weakest tactic coverage first, then gaps before partials)"
+)
+
+
+def _tactic_coverage_pct(ctx: AttackDeliverableContext) -> dict[str, float]:
+    return {tc.tactic_id: tc.coverage_pct for tc in ctx.rollup.by_tactic}
+
+
+def _remediation_sort_key(cov: AttackCoverage, tactic_cov: dict[str, float]) -> tuple:
+    try:
+        tactics = technique_by_id(cov.technique_code).tactics
+    except KeyError:
+        tactics = ()
+    # Worst (lowest) coverage among the technique's tactics; an unknown technique
+    # (not in the catalog) has no tactics and sorts to the very end.
+    worst = min((tactic_cov.get(t, 100.0) for t in tactics), default=999.0)
+    return (worst, _STATUS_RANK.get(cov.status or "", 99), cov.technique_code)
+
+
+def _remediation_rows(
+    ctx: AttackDeliverableContext, *, limit: int = _REMEDIATION_LIMIT
+) -> list[AttackCoverage]:
+    tactic_cov = _tactic_coverage_pct(ctx)
+    rows = [c for c in ctx.coverage if c.status in _REMEDIATION_STATUSES]
+    rows.sort(key=lambda c: _remediation_sort_key(c, tactic_cov))
+    return rows[:limit]
+
+
 # ---------------------------------------------------------------------------
 # XLSX
 # ---------------------------------------------------------------------------
@@ -247,21 +286,21 @@ def render_docx(ctx: AttackDeliverableContext) -> bytes:
         ],
     )
 
-    gap_rows = [c for c in ctx.coverage if c.status == CoverageStatus.GAP.value]
-    gap_rows.sort(key=lambda c: c.technique_code)
-    gap_rows = gap_rows[:50]
-    add_heading(doc, f"Top remediation gaps ({len(gap_rows)} of {ctx.rollup.gap} shown)")
-    if not gap_rows:
-        add_paragraphs(doc, ["No techniques flagged as Gap."])
+    remediation = _remediation_rows(ctx)
+    add_heading(doc, f"{REMEDIATION_SECTION_TITLE} — top {len(remediation)}")
+    if not remediation:
+        add_paragraphs(doc, ["No techniques flagged as Gap or Partial."])
     else:
         rows = []
-        for cov in gap_rows:
+        for cov in remediation:
             try:
                 name = technique_by_id(cov.technique_code).name
             except KeyError:
-                name = ""
-            rows.append([cov.technique_code, name])
-        add_table(doc, ["Code", "Technique"], rows)
+                # B-7: fall back to the code (the PDF already did) so Word never
+                # renders a blank technique cell.
+                name = cov.technique_code
+            rows.append([cov.technique_code, name, _status_or_unscored(cov.status)])
+        add_table(doc, ["Code", "Technique", "Status"], rows)
 
     return to_bytes(doc)
 
@@ -348,29 +387,23 @@ def render_pdf(ctx: AttackDeliverableContext) -> bytes:
 
     story.append(PageBreak())
 
-    # Top-50 gap list.
-    gap_rows = [c for c in ctx.coverage if c.status == CoverageStatus.GAP.value]
-    gap_rows.sort(key=lambda c: c.technique_code)
-    gap_rows = gap_rows[:50]
-    story.append(
-        Paragraph(
-            f"Top remediation gaps ({len(gap_rows)} of {ctx.rollup.gap} shown)",
-            h2,
-        )
-    )
-    if not gap_rows:
-        story.append(Paragraph("No techniques flagged as Gap.", body))
+    # Prioritized remediation list (B-7): weakest tactic coverage first, then
+    # gaps before partials; not an alphabetical dump.
+    remediation = _remediation_rows(ctx)
+    story.append(Paragraph(f"{REMEDIATION_SECTION_TITLE} — top {len(remediation)}", h2))
+    if not remediation:
+        story.append(Paragraph("No techniques flagged as Gap or Partial.", body))
     else:
-        gap_table_data: list[list] = [["Code", "Technique"]]
-        for cov in gap_rows:
+        gap_table_data: list[list] = [["Code", "Technique", "Status"]]
+        for cov in remediation:
             try:
                 name = technique_by_id(cov.technique_code).name
             except KeyError:
                 name = cov.technique_code
-            gap_table_data.append([cov.technique_code, name])
+            gap_table_data.append([cov.technique_code, name, _status_or_unscored(cov.status)])
         gap_table = Table(
             gap_table_data,
-            colWidths=[1.1 * inch, 4.6 * inch],
+            colWidths=[1.1 * inch, 3.8 * inch, 0.8 * inch],
             repeatRows=1,
         )
         gap_table.setStyle(_table_style())

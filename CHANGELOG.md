@@ -4,6 +4,26 @@ All notable changes to SHIELD by Kentro v2.0. Format roughly follows [Keep a Cha
 
 ## [Unreleased]
 
+### Documentation, backup/restore, and seed-loader remediation — 2026-07-09
+
+- **H-1 (auth truth):** Retracted the fictional "compensating controls." Idle
+  timeout, forced re-auth, and refresh-token rotation are now documented as
+  PLANNED, NOT PRESENT across `README.md`, `BUILD_REPORT.md` (OWASP A07),
+  `docs/architecture.md`, `infra/keycloak/README.md`; dead env-var names removed
+  from `.env.example` and `docker-compose.yml`. New decision `D-017` defers
+  enforcement to the MFA work package (refresh-token rotation/revocation first).
+- **H-4 (doc truth pass):** Corrected `docs/architecture.md` (multi-tenant, no
+  Celery worker, `audit_entries` table, no `unredact`) and `docs/operations.md`
+  (no worker); renumbered the duplicate `D-015` to `D-016`; amended `D-009` to
+  rescind i18n/`next-intl` for v1; collapsed the three `[Unreleased]` changelog
+  headings to one (this section) plus dated phase headings.
+- **H-3 (backup/restore):** Added `infra/backup/{backup,restore,restore-drill}.sh`,
+  `docs/runbooks/backup-restore.md`, and a non-blocking CI restore-drill job.
+- **E-6 (seed loaders):** Seed loaders now run inside the api container as
+  documented — `packages/` is mounted read-only, data resolves via
+  `SHIELD_SEED_DATA_DIR`, and `_common.py` no longer crashes on `parents[3]`.
+  Added `scripts/seed.sh`.
+
 ### Multi-tenant: allow many clients per deployment — 2026-05-21
 
 - Added `client_id` to `services`, `service_requests`, `artifacts` (Alembic 0013); made `client_id` `NOT NULL` on `csf_assessments`, `csf_answers`, `zt_assessments`, `zt_answers`, `attack_assessments`, `attack_coverage` after backfill from the deployment's existing singleton client (or a placeholder `(legacy backfill)` client when business data exists but no `client` row does).
@@ -167,7 +187,7 @@ All notable changes to SHIELD by Kentro v2.0. Format roughly follows [Keep a Cha
 
 - D-001 through D-014 (opening commit). No new decisions added during stages 1–9 beyond DECISIONS.md entries already on `main`.
 
-## [Unreleased — Phase 2 in progress]
+## [Phase 2 — Intake]
 
 ### Phase 2 stage 1 — Intake data model (`v0.2.1`) — 2026-05-19
 
@@ -301,7 +321,7 @@ A SQLite-only dev demo is documented in BUILD_REPORT.md ("Recommended next steps
 
 - No new DECISIONS.md entries beyond stages tracked in this CHANGELOG; the seven §17 open questions were already settled in Phase 1's D-003 through D-009.
 
-## [Unreleased — Phase 3 in progress]
+## [Phase 3 — Tech Debt]
 
 ### Phase 3 stage 1 — Tech Debt data model (`v0.3.1`) — 2026-05-19
 

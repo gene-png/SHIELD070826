@@ -115,7 +115,7 @@ def analyze(
     *,
     notes: Mapping[str, str | None] | None = None,
     target_tier: int = DEFAULT_TARGET_TIER,
-    top_n: int = DEFAULT_TOP_N,
+    top_n: int | None = DEFAULT_TOP_N,
 ) -> GapAnalysis:
     """Return a prioritized gap analysis.
 

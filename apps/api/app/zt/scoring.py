@@ -234,7 +234,7 @@ def analyze_gaps(
     notes: Mapping[str, str | None] | None = None,
     target_stage: int = DEFAULT_TARGET_STAGE,
     targets: Mapping[str, int | None] | None = None,
-    top_n: int = DEFAULT_TOP_N,
+    top_n: int | None = DEFAULT_TOP_N,
 ) -> GapAnalysis:
     """Gaps where current < target. `targets` supplies per-capability targets
     (Work Order D3); a capability with no per-capability target falls back to

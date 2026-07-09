@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from reportlab.platypus import TableStyle
 from app.models.csf_assessment import CsfAnswer, CsfAssessment
 
+# The PDF/DOCX narratives print only the top slice; the XLSX Gap Plan sheet
+# carries the full list. The heading states "Top N of <total_gap_count>" so the
+# narrative can never silently contradict the true gap count (B-4).
+NARRATIVE_GAP_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class CsfDeliverableContext:
@@ -276,13 +281,26 @@ def render_docx(ctx: CsfDeliverableContext) -> bytes:
         ],
     )
 
-    add_heading(doc, f"Top remediation gaps (target T{ctx.gap.target_tier})")
-    if not ctx.gap.gaps:
+    shown = ctx.gap.gaps[:NARRATIVE_GAP_LIMIT]
+    total = ctx.gap.total_gap_count
+    add_heading(
+        doc,
+        f"Top {len(shown)} of {total} remediation gaps (target T{ctx.gap.target_tier})",
+    )
+    if not shown:
         add_paragraphs(
             doc,
             [f"No gaps at target tier {ctx.gap.target_tier} " f"({ctx.gap.target_label})."],
         )
     else:
+        if total > len(shown):
+            add_paragraphs(
+                doc,
+                [
+                    "See the Gap Plan sheet of the accompanying XLSX workbook for the "
+                    f"full list of all {total} remediation gaps.",
+                ],
+            )
         add_table(
             doc,
             ["Code", "Function", "Subcategory", "Current → Target", "Priority"],
@@ -294,7 +312,7 @@ def render_docx(ctx: CsfDeliverableContext) -> bytes:
                     f"T{g.current_tier} → T{g.target_tier}",
                     f"{g.priority_score:.2f}",
                 ]
-                for g in ctx.gap.gaps
+                for g in shown
             ],
         )
 
@@ -367,8 +385,15 @@ def render_pdf(ctx: CsfDeliverableContext) -> bytes:
 
     story.append(PageBreak())
 
-    story.append(Paragraph(f"Top remediation gaps (target T{ctx.gap.target_tier})", h2))
-    if not ctx.gap.gaps:
+    shown = ctx.gap.gaps[:NARRATIVE_GAP_LIMIT]
+    total = ctx.gap.total_gap_count
+    story.append(
+        Paragraph(
+            f"Top {len(shown)} of {total} remediation gaps (target T{ctx.gap.target_tier})",
+            h2,
+        )
+    )
+    if not shown:
         story.append(
             Paragraph(
                 f"No gaps at target tier {ctx.gap.target_tier} " f"({ctx.gap.target_label}).",
@@ -376,10 +401,18 @@ def render_pdf(ctx: CsfDeliverableContext) -> bytes:
             )
         )
     else:
+        if total > len(shown):
+            story.append(
+                Paragraph(
+                    "See the Gap Plan sheet of the accompanying XLSX workbook for the "
+                    f"full list of all {total} remediation gaps.",
+                    body,
+                )
+            )
         gap_table_data: list[list] = [
             ["Code", "Function", "Subcategory", "Current → Target", "Priority"]
         ]
-        for g in ctx.gap.gaps:
+        for g in shown:
             gap_table_data.append(
                 [
                     g.code,

@@ -86,8 +86,7 @@ export async function fetchInbox(): Promise<InboxResponse> {
 export function describeMessagesError(err: unknown): string {
   if (err instanceof MessagesProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??

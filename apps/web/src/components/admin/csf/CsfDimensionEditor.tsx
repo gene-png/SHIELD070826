@@ -29,11 +29,7 @@ const TIERS: { value: string; label: string }[] = [
 ];
 
 type DimKey =
-  | "governance"
-  | "policy"
-  | "implementation"
-  | "monitoring"
-  | "improvement";
+  "governance" | "policy" | "implementation" | "monitoring" | "improvement";
 
 const DIMS: { key: DimKey; label: string }[] = [
   { key: "governance", label: "Governance" },
@@ -46,8 +42,7 @@ const DIMS: { key: DimKey; label: string }[] = [
 function describeError(err: unknown): string {
   if (err instanceof CsfProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??
