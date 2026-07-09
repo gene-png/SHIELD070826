@@ -42,12 +42,11 @@ def register_admin(
     import os
     import uuid
 
-    from sqlalchemy import create_engine, delete
-    from sqlalchemy.orm import Session
-
     from app.models.client import Client
     from app.models.client_domain import ClientDomain
     from app.models.user import User, UserRole
+    from sqlalchemy import create_engine, delete
+    from sqlalchemy.orm import Session
 
     r = client.post(
         "/auth/register",

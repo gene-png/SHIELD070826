@@ -38,7 +38,7 @@ DEFAULT_MAX_IDLE_DAYS = 365
 
 # Argon2 never produces this, so verify_password can never match it -> the
 # shredded account can never authenticate.
-_UNUSABLE_PASSWORD_HASH = "!purged"  # noqa: S105 - sentinel, not a real secret
+_UNUSABLE_PASSWORD_HASH = "!purged"  # noqa: S105 - sentinel, not a real secret  # nosec B105
 
 
 @dataclass

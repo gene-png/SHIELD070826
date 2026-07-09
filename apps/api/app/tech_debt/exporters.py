@@ -87,7 +87,7 @@ class DeliverableAnalysis:
     disposition_counts: dict[str, int]  # keep / consolidate / cut / undecided
     category_count: int
     spend_by_category: list[tuple[str, float]]  # descending, all categories
-    overlap: "object"  # app.tech_debt.overlap.OverlapAnalysis
+    overlap: object  # app.tech_debt.overlap.OverlapAnalysis
     savings_str: str
     savings_pct: str
 
@@ -118,7 +118,9 @@ def _build_analysis(ctx: DeliverableContext) -> DeliverableAnalysis:
         if ctx.total_cost > 0
         else "via consolidation"
     )
-    category_count = len({(i.category or "").strip() for i in ctx.items if (i.category or "").strip()})
+    category_count = len(
+        {(i.category or "").strip() for i in ctx.items if (i.category or "").strip()}
+    )
 
     return DeliverableAnalysis(
         disposition_counts=counts,
@@ -163,8 +165,16 @@ def render_xlsx(ctx: DeliverableContext) -> bytes:
         raise RuntimeError("openpyxl returned no active worksheet")
     ws.title = "Inventory"
     header = [
-        "Name", "Vendor", "Category", "Function", "Annual Cost (USD)",
-        "Licenses", "Disposition", "Rationale", "Notes", "AI Confidence %",
+        "Name",
+        "Vendor",
+        "Category",
+        "Function",
+        "Annual Cost (USD)",
+        "Licenses",
+        "Disposition",
+        "Rationale",
+        "Notes",
+        "AI Confidence %",
     ]
     ws.append(header)
     _style_header(ws, len(header))
@@ -192,7 +202,9 @@ def render_xlsx(ctx: DeliverableContext) -> bytes:
     sc = ws.cell(row=summary_row + 1, column=5, value=ctx.estimated_savings)
     sc.number_format = "$#,##0"
     if not ctx.savings_cost_known:
-        ws.cell(row=summary_row + 1, column=6, value="≥ (one or more cut rows missing a cost)").font = Font(italic=True)
+        ws.cell(
+            row=summary_row + 1, column=6, value="≥ (one or more cut rows missing a cost)"
+        ).font = Font(italic=True)
     _widths(ws, [28, 22, 16, 28, 18, 10, 14, 38, 38, 16])
 
     # --- Sheet 2: Spend by Category ---
@@ -204,10 +216,14 @@ def render_xlsx(ctx: DeliverableContext) -> bytes:
         c = (it.category or "Uncategorized").strip() or "Uncategorized"
         tool_counts[c] = tool_counts.get(c, 0) + 1
     for cat, spend in an.spend_by_category:
-        ws2.append([
-            cat, spend, tool_counts.get(cat, 0),
-            (spend / ctx.total_cost) if ctx.total_cost else 0,
-        ])
+        ws2.append(
+            [
+                cat,
+                spend,
+                tool_counts.get(cat, 0),
+                (spend / ctx.total_cost) if ctx.total_cost else 0,
+            ]
+        )
     for r in range(2, ws2.max_row + 1):
         ws2.cell(row=r, column=2).number_format = "$#,##0"
         ws2.cell(row=r, column=4).number_format = "0.0%"
@@ -218,9 +234,27 @@ def render_xlsx(ctx: DeliverableContext) -> bytes:
     ws3.append(["Type", "Group", "Tool Count", "Combined Cost (USD)", "Cost Known", "Tools"])
     _style_header(ws3, 6)
     for b in overlap.by_category:
-        ws3.append(["Category", b.key, b.item_count, b.total_cost, "Yes" if b.cost_known else "No", ", ".join(b.item_names)])
+        ws3.append(
+            [
+                "Category",
+                b.key,
+                b.item_count,
+                b.total_cost,
+                "Yes" if b.cost_known else "No",
+                ", ".join(b.item_names),
+            ]
+        )
     for b in overlap.by_vendor:
-        ws3.append(["Vendor", b.key, b.item_count, b.total_cost, "Yes" if b.cost_known else "No", ", ".join(b.item_names)])
+        ws3.append(
+            [
+                "Vendor",
+                b.key,
+                b.item_count,
+                b.total_cost,
+                "Yes" if b.cost_known else "No",
+                ", ".join(b.item_names),
+            ]
+        )
     for r in range(2, ws3.max_row + 1):
         ws3.cell(row=r, column=4).number_format = "$#,##0"
     _widths(ws3, [12, 24, 12, 20, 12, 60])
@@ -452,36 +486,29 @@ def render_html_dashboard(ctx: DeliverableContext) -> bytes:
 
     # ---- Spend-by-category bars ----
     if top_cats:
-        cat_bars = "".join(
-            f"""
+        cat_bars = "".join(f"""
         <div class="bar-row">
           <div class="bar-label" title="{escape(cat)}">{escape(cat)}</div>
           <div class="bar-track"><div class="bar-fill" style="width:{(spend / max_cat * 100) if max_cat else 0:.1f}%"></div></div>
           <div class="bar-value">{_fmt_usd(spend)}</div>
-        </div>"""
-            for cat, spend in top_cats
-        )
+        </div>""" for cat, spend in top_cats)
     else:
         cat_bars = '<p class="desc">No costed items to chart.</p>'
 
     # ---- Vendor sprawl bars ----
     if overlap.by_vendor:
-        vendor_bars = "".join(
-            f"""
+        vendor_bars = "".join(f"""
         <div class="bar-row">
           <div class="bar-label" title="{escape(b.key)}">{escape(b.key)}</div>
           <div class="bar-track"><div class="bar-fill cyan" style="width:{(b.item_count / max_vendor * 100) if max_vendor else 0:.1f}%"></div></div>
           <div class="bar-value">{b.item_count} tools</div>
-        </div>"""
-            for b in overlap.by_vendor[:10]
-        )
+        </div>""" for b in overlap.by_vendor[:10])
     else:
         vendor_bars = '<p class="desc">No vendor appears more than once.</p>'
 
     # ---- Overlap clusters (category buckets) ----
     if overlap.by_category:
-        clusters = "".join(
-            f"""
+        clusters = "".join(f"""
         <div class="rcard {'high' if b.item_count >= 3 else 'medium'}">
           <div class="rhead">
             <span class="cat">{escape(b.key)}</span>
@@ -491,9 +518,7 @@ def render_html_dashboard(ctx: DeliverableContext) -> bytes:
             {''.join(f'<span class="product-tag">{escape(n)}</span>' for n in b.item_names)}
           </div>
           <div class="reco">Combined spend: <b>{_fmt_usd(b.total_cost) if b.cost_known else '≥ ' + _fmt_usd(b.total_cost)}</b> — consolidation candidate.</div>
-        </div>"""
-            for b in overlap.by_category
-        )
+        </div>""" for b in overlap.by_category)
     else:
         clusters = '<p class="desc">No functional overlaps detected — every category has a single tool.</p>'
 
@@ -507,8 +532,7 @@ def render_html_dashboard(ctx: DeliverableContext) -> bytes:
     """
 
     # ---- Inventory table ----
-    rows = "".join(
-        f"""
+    rows = "".join(f"""
         <tr class="{'flag' if (it.confidence_pct is not None and it.confidence_pct < 70) else ''}">
           <td>{escape(it.name)}</td>
           <td>{escape(it.vendor or '—')}</td>
@@ -518,9 +542,7 @@ def render_html_dashboard(ctx: DeliverableContext) -> bytes:
           <td>{it.license_count if it.license_count is not None else '—'}</td>
           <td><span class="disp {_disposition_slug(it.disposition)}">{_disposition_label(it.disposition)}</span></td>
           <td>{f'{it.confidence_pct}%' if it.confidence_pct is not None else '—'}</td>
-        </tr>"""
-        for it in items
-    )
+        </tr>""" for it in items)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -672,7 +694,7 @@ def render_html_dashboard(ctx: DeliverableContext) -> bytes:
   <footer>Generated by SHIELD by Kentro · {escape(ctx.service_title)} · Total annual cost {_fmt_usd(ctx.total_cost, dash='$0')} · Estimated savings {escape(savings_str)}</footer>
 </div>
 </body>
-</html>""".encode("utf-8")
+</html>""".encode()
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +805,9 @@ def render_docx(ctx: DeliverableContext) -> bytes:
     if not ctx.savings_cost_known:
         add_paragraphs(
             doc,
-            ["Note: at least one row marked Cut is missing an annual cost; the savings figure is a lower bound."],
+            [
+                "Note: at least one row marked Cut is missing an annual cost; the savings figure is a lower bound."
+            ],
         )
 
     # --- Full inventory ---

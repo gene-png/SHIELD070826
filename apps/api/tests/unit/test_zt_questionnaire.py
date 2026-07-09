@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tests.conftest import register_admin
+
 _PKG = Path(__file__).resolve().parents[4] / "packages" / "zt-data" / "source"
 
 
@@ -94,15 +96,9 @@ def _seed_question(TestSession: sessionmaker, framework_key: str, ext_id: str, p
 
 
 def _admin_service(c: TestClient, kind: str) -> tuple[str, str]:
-    admin = c.post(
-        "/auth/register",
-        json={
-            "email": "admin@kentro.example",
-            "password": "correct horse battery staple!",
-            "display_name": "A",
-        },
-    )
-    bearer = admin.json()["tokens"]["access_token"]
+    # Self-registration only ever mints `client`-role users, so go through the
+    # shared helper that promotes the row to a cross-tenant admin.
+    bearer = register_admin(c, "admin@kentro.example")["tokens"]["access_token"]
     cid = c.post(
         "/admin/clients",
         headers={"Authorization": f"Bearer {bearer}"},

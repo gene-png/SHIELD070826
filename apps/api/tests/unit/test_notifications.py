@@ -8,14 +8,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-from tests.conftest import register_admin
 from alembic import command
 from alembic.config import Config
 from app.models.notification import Notification
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
+
+from tests.conftest import register_admin
 
 
 @pytest.fixture()

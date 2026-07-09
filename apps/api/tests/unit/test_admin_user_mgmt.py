@@ -66,9 +66,7 @@ def ctx(tmp_path) -> Iterator[tuple[TestClient, sessionmaker]]:
 
 
 def _admin_token(client: TestClient) -> str:
-    r = client.post(
-        "/auth/login", json={"email": "admin@kentro.example", "password": PASSWORD}
-    )
+    r = client.post("/auth/login", json={"email": "admin@kentro.example", "password": PASSWORD})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
 
@@ -126,9 +124,7 @@ def test_create_client_requires_existing_client_id(ctx) -> None:
     assert r.status_code == 422
 
     # Create a client tenant, then a client user attached to it.
-    created = client.post(
-        "/admin/clients", headers=_h(token), json={"legal_name": "Acme Corp"}
-    )
+    created = client.post("/admin/clients", headers=_h(token), json={"legal_name": "Acme Corp"})
     cid = created.json()["id"]
     r = client.post(
         "/admin/users",
@@ -149,9 +145,7 @@ def test_create_client_requires_existing_client_id(ctx) -> None:
 def test_admin_with_client_id_rejected(ctx) -> None:
     client, _ = ctx
     token = _admin_token(client)
-    created = client.post(
-        "/admin/clients", headers=_h(token), json={"legal_name": "Acme Corp"}
-    )
+    created = client.post("/admin/clients", headers=_h(token), json={"legal_name": "Acme Corp"})
     cid = created.json()["id"]
     r = client.post(
         "/admin/users",
@@ -281,6 +275,9 @@ def test_deactivate_then_reactivate(ctx) -> None:
     r = client.post(f"/admin/users/{uid}/reactivate", headers=_h(token))
     assert r.status_code == 200
     assert r.json()["is_active"] is True
-    assert client.post(
-        "/auth/login", json={"email": "client@newco.com", "password": PASSWORD}
-    ).status_code == 200
+    assert (
+        client.post(
+            "/auth/login", json={"email": "client@newco.com", "password": PASSWORD}
+        ).status_code
+        == 200
+    )

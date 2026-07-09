@@ -7,8 +7,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-from tests.conftest import register_admin
 from alembic import command
 from alembic.config import Config
 from app.csf.catalog import SUBCATEGORIES, FunctionCode
@@ -21,6 +19,8 @@ from app.csf.gap import (
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+
+from tests.conftest import register_admin
 
 # ---------------------------------------------------------------------------
 # Pure function

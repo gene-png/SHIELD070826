@@ -19,6 +19,10 @@ ignore = ["S101"]  # assert in tests is fine
 "**/csf/catalog.py" = ["E501"]  # NIST CSF 2.0 outcome statements are prose that exceeds 100 chars
 "**/zt/catalog.py" = ["E501"]   # CISA ZTMM + DoD ZTRA outcome statements are prose that exceeds 100 chars
 "**/attack/catalog.py" = ["E501"]  # MITRE ATT&CK matrix is wide reference data; tactic-alias comments exceed 100 chars
+# HTML report templates: markup embedded in f-strings reads worse when wrapped,
+# and black won't split string literals, so these can't be formatted away.
+"**/tech_debt/exporters.py" = ["E501"]
+"**/zt/exporters.py" = ["E501"]
 
 [tool.black]
 line-length = 100

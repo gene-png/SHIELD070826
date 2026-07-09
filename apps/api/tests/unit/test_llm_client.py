@@ -7,7 +7,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
 from alembic import command
 from alembic.config import Config
 from app.ai.llm import FixtureProvider, LLMClient, LLMResponse

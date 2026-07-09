@@ -161,7 +161,7 @@ def test_xlsx_render_produces_valid_workbook(context_with_items) -> None:
 
     wb = load_workbook(io.BytesIO(raw))
     ws = wb.active
-    assert ws.title == "Capability List"
+    assert ws.title == "Inventory"
     # Header row.
     assert ws.cell(row=1, column=1).value == "Name"
     assert ws.cell(row=1, column=5).value == "Annual Cost (USD)"

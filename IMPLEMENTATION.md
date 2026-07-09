@@ -1,13 +1,13 @@
 # SHIELD v2 — Implementation Plan
 
-|                          |                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| **Version**              | v1                                                                                         |
-| **Date**                 | 2026-06-24                                                                                 |
-| **Repo**                 | `SHIELD062626` (standalone)                                                                |
-| **Branch**               | `feat/multi-tenant-engagement-flow`                                                        |
-| **Source of truth**      | In-repo `reference-docs/` (Master Spec, AI_Prompt + cited companion specs)                 |
-| **Author**               | SHIELD Build Agent                                                                         |
+|                     |                                                                            |
+| ------------------- | -------------------------------------------------------------------------- |
+| **Version**         | v1                                                                         |
+| **Date**            | 2026-06-24                                                                 |
+| **Repo**            | `SHIELD062626` (standalone)                                                |
+| **Branch**          | `feat/multi-tenant-engagement-flow`                                        |
+| **Source of truth** | In-repo `reference-docs/` (Master Spec, AI_Prompt + cited companion specs) |
+| **Author**          | SHIELD Build Agent                                                         |
 
 This is the living implementation plan for the remaining SHIELD v2 build, derived from the Developer Work Order and verified against the live code. It is the work order, made executable and tracked. Update the status checkboxes and the Progress Log as items land.
 
