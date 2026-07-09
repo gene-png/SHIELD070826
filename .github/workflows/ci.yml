@@ -93,6 +93,50 @@ jobs:
           API_BASE_URL: http://localhost:8000
         run: pnpm -F web build
 
+  e2e:
+    name: E2E (Playwright, composed stack)
+    runs-on: ubuntu-latest
+    # Sprint 0 lands this non-blocking so a harness hiccup cannot wedge the
+    # first remediation PRs. Flip to blocking once it has run green for a
+    # full sprint (tracked in FABLE_REMEDIATION_PLAN.md, Sprint 1 exit).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fixture mode: no ANTHROPIC_API_KEY is available to CI, and none is
+      # needed. The live smoke test (tests/live) stays skipped.
+      - name: Bring up the stack
+        env:
+          SHIELD_LLM_MODE: fixture
+        run: docker compose up -d --wait db redis minio createbuckets api web
+
+      - name: Seed the demo tenant
+        run: docker compose exec -T api python scripts/seed_demo.py
+
+      - name: Run Playwright
+        env:
+          CI: "true"
+        run: docker compose --profile test run --rm playwright
+
+      - name: Dump API logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200 api web
+
+      - name: Upload traces, screenshots, video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            e2e/test-results/
+            e2e/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile test down -v
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

@@ -210,6 +210,38 @@ services:
         [ -f apps/web/node_modules/next/dist/bin/next ] || pnpm install;
         exec pnpm -F web dev
 
+  # Test-only. The `test` profile keeps it out of `docker compose up`; run it
+  # explicitly:  docker compose --profile test run --rm playwright
+  # It talks to `web`/`api` over the compose network, so no host toolchain
+  # (pnpm, browsers) is needed and CI runs the identical command.
+  playwright:
+    profiles: ["test"]
+    # PIN, do not float to :latest. The image bakes browser builds (chromium-1129)
+    # that only the matching @playwright/test release knows how to launch. This
+    # tag and e2e/package.json's "@playwright/test": "1.61.1" must move together,
+    # or the run dies with `Executable doesn't exist at /ms-playwright/...`.
+    image: mcr.microsoft.com/playwright:v1.61.1-noble
+    working_dir: /e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: ${PLAYWRIGHT_BASE_URL:-http://web:3000}
+      PLAYWRIGHT_API_URL: ${PLAYWRIGHT_API_URL:-http://api:8000}
+      CI: ${CI:-}
+    depends_on:
+      - api
+      - web
+    volumes:
+      - ./e2e:/e2e
+      # Keep node_modules off the bind mount: the image's browsers are matched
+      # to the pinned @playwright/test, and a host-side node_modules would
+      # shadow them.
+      - playwright-node-modules:/e2e/node_modules
+    command:
+      - sh
+      - -c
+      - >
+        npm install --silent --no-audit --no-fund &&
+        exec npx playwright test
+
 volumes:
   postgres-data:
   redis-data:
@@ -217,3 +249,4 @@ volumes:
   keycloak-data:
   node-modules-root:
   node-modules-web:
+  playwright-node-modules:
