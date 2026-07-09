@@ -32,6 +32,8 @@ from app.models._common import TimestampMixin, UUIDPKMixin
 
 # Portable JSON list (native JSONB on Postgres, generic JSON on SQLite tests).
 _JSON_LIST = JSON().with_variant(JSONB, "postgresql")
+# Same, for an object rather than a list (FIX E-4).
+_JSON_DICT = JSON().with_variant(JSONB, "postgresql")
 
 
 class AttackAssessmentStatus(enum.StrEnum):
@@ -56,6 +58,12 @@ class AttackAssessment(UUIDPKMixin, TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Work Order C3: an AI run sets this true; finalize clears it.
     documents_stale: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # FIX E-4: the mitre_map prompt asks for `executive_summary` and
+    # `top_blind_spots`, and the route used to consume only `techniques` -- so
+    # the narrative was generated, paid for in output tokens, and thrown away
+    # on every run. Persist it (nullable, additive; migration 0032) so it
+    # survives a reload and can feed the deliverable's executive section.
+    ai_summaries: Mapped[dict | None] = mapped_column(_JSON_DICT)
     status: Mapped[AttackAssessmentStatus] = mapped_column(
         SAEnum(
             AttackAssessmentStatus,

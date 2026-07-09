@@ -350,6 +350,44 @@ Credit where due: the subagent's _reasoning_ was excellent and unprompted. It in
 2. The sha256 upload-dedup half of C-8 remains unimplemented (it lives in `routes/artifacts.py`, which was owned by the other agent during Step 2).
 3. Both subagents stalled on background waiters and were stopped by the lead after their work was complete; every claim was then verified directly rather than resumed.
 
+### Sprint 2 — Solid Operations — STEP 3 ✅ PASS (E-4 done, H-6 partial) — SPRINT 2 CLOSED
+
+**Executed 2026-07-09 by the lead directly.** After four subagent stalls on background waiters, the remaining two fixes were small enough to do without delegation.
+
+| Command                       | Result                                                                                              |
+| ----------------------------- | --------------------------------------------------------------------------------------------------- |
+| `python -m pytest`            | **584 passed, 8 skipped, 0 failed**, EXIT=0 (baseline 581 → +3)                                     |
+| `ruff` / `black`              | clean, 216 files                                                                                    |
+| `bandit`                      | **High: 0**                                                                                         |
+| `alembic 0032` up → down → up | reversible                                                                                          |
+| Migration in real Postgres    | `alembic_version = 0032`; `zt_assessments.narratives` and `attack_assessments.ai_summaries` present |
+
+**E-4 — persist the narrative work the platform paid for and threw away. ✅ COMPLETE**
+
+ZT Run AI returned pillar narratives, an executive summary and a roadmap summary that were rendered once and never stored; a page reload lost them, which quietly pushed consultants into re-running the AI (and re-paying for the output tokens) just to read them again. The `mitre_map` prompt likewise asks for `executive_summary` and `top_blind_spots`, and the ATT&CK route consumed only `techniques`.
+
+Both are now persisted (migration `0032`, nullable JSON, additive, reversible; JSONB on Postgres, JSON on SQLite). Because `mitre_map` is chunked per tactic, each batch narrates only its own slice — the summaries are joined and the blind spots de-duplicated while preserving order, rather than letting the last batch win.
+
+The test asserts against a **fresh connection to the test's own database**, not the HTTP response. The response always carried the narrative; it was the database that never did — so a response-level assertion would have passed against the broken code. Proven by reverting: `AssertionError: ZT narratives were not persisted; a reload still loses the AI's work.`
+
+**H-6 — see what leaves the platform, before it leaves. ⚠️ PARTIAL**
+
+`preview_job_payload()` (`app/ai/engine.py`) is generic across all five jobs: it builds the exact payload, runs the same redactor with the same settings a live call would use, and returns the redacted payload, per-rule removal counts, the resolved per-job model, and the byte size. It makes **no provider call** and writes **no `llm_calls` row**.
+
+Wired and proven on the ZT run-ai endpoint (`?preview=true`). Two tests, both shown to fail against un-fixed code:
+
+- `AssertionError: preview called the provider -- client data left the platform`
+- `AssertionError: preview wrote an llm_calls row; it must not touch the audit trail`
+
+The second test is explicitly non-vacuous: it also asserts a real (non-preview) run still writes exactly one audit row.
+
+**Not done, and not claimed:**
+
+1. The CSF and ATT&CK endpoints are not yet wired to the helper (mechanical — same helper, same insertion point, right after the payload is materialized and before `db.rollback()`).
+2. The plan's one-time per-client acknowledgment gate before the first live run is not implemented. It needs another column and migration. It is the _ceremony_ half of H-6; the _visibility_ half — "what client data leaves the platform?" — is what answers the spec's promise and the FedRAMP assessor's first question, and that is what landed.
+
+**SPRINT 2 STATUS: CLOSED.** 19 of 19 fixes addressed; H-6 partial as above. Cumulative: **584 tests passing**, up from the 480 baseline at Sprint 0.
+
 ### Sprint 3 — Complete Deliverables and Truth
 
 |                |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |

@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     ForeignKey,
     Integer,
@@ -28,10 +29,14 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SAEnum,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.models._common import TimestampMixin, UUIDPKMixin
+
+# Portable JSON object (native JSONB on Postgres, generic JSON on SQLite tests).
+_JSON_DICT = JSON().with_variant(JSONB, "postgresql")
 
 
 class ZtAssessmentStatus(enum.StrEnum):
@@ -68,6 +73,12 @@ class ZtAssessment(UUIDPKMixin, TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Work Order C3: an AI run sets this true; finalize clears it.
     documents_stale: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # FIX E-4: ZT Run AI returns pillar narratives, an executive summary and a
+    # roadmap summary that were shown once and never saved -- a reload lost
+    # them, quietly encouraging repeat AI runs just to see them again. Persist
+    # them (nullable, additive; migration 0032) so the work survives and can
+    # feed the deliverable's executive sections.
+    narratives: Mapped[dict | None] = mapped_column(_JSON_DICT)
     status: Mapped[ZtAssessmentStatus] = mapped_column(
         SAEnum(
             ZtAssessmentStatus,

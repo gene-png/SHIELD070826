@@ -645,6 +645,10 @@ def _attack_run_ai_locked(
     batches = _chunk_by_tactic(sorted(rows))
     db.rollback()
     suggestions: list[Any] = []
+    # FIX E-4 accumulators: mitre_map is chunked per tactic, so each batch
+    # narrates only its own slice. Collect them all rather than keeping one.
+    batch_summaries: list[str] = []
+    blind_spots: list[str] = []
     try:
         for batch in batches:
             result = run_job(
@@ -661,6 +665,15 @@ def _attack_run_ai_locked(
             if data is None or "techniques" not in data:
                 raise ValueError("mitre_map batch returned no 'techniques' array")
             suggestions.extend(data.get("techniques") or [])
+            # FIX E-4: the prompt asks for these and the route used to discard
+            # them. Each batch narrates its own tactic, so keep every summary
+            # and union the blind spots rather than letting the last batch win.
+            summary = data.get("executive_summary")
+            if isinstance(summary, str) and summary.strip():
+                batch_summaries.append(summary.strip())
+            spots = data.get("top_blind_spots")
+            if isinstance(spots, list):
+                blind_spots.extend(s for s in spots if isinstance(s, str))
     except LLMTimeoutError as exc:
         # FIX E-1b: a provider timeout is distinct from a bad batch — surface a
         # typed 504 (nothing applied), not the generic 502.
@@ -718,6 +731,12 @@ def _attack_run_ai_locked(
         for ch in d.changes
     ]
 
+    # FIX E-4: persist the narrative the prompt paid for. De-duplicate the
+    # blind spots while preserving order so the deliverable reads cleanly.
+    a.ai_summaries = {
+        "executive_summary": ("\n\n".join(batch_summaries) or None),
+        "top_blind_spots": list(dict.fromkeys(blind_spots)),
+    }
     a.documents_stale = True  # Work Order C3
     audit(
         db,

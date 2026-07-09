@@ -24,11 +24,12 @@ from collections.abc import Iterable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.diff import diff_keyed_rows
-from app.ai.engine import run_job
+from app.ai.engine import preview_job_payload, run_job
 from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
 from app.db.locks import RunInProgressError, run_lock
@@ -386,7 +387,8 @@ def run_ai(
     client: Annotated[Client, Depends(current_client)],
     db: Annotated[Session, Depends(get_db)],
     llm: Annotated[LLMClient, Depends(_llm_dep)],
-) -> ZtRunAiResponse:
+    preview: bool = False,
+) -> ZtRunAiResponse | JSONResponse:
     """The ZT 'Run AI'. Suggests a current and target maturity level per
     capability (on the framework's own scale) plus per-pillar narratives. AI
     suggests; locked rows are untouched; code does the pillar roll-up + roadmap.
@@ -401,7 +403,7 @@ def run_ai(
     # + the provider call. Survives the db.rollback() E-1 does (see app/db/locks.py).
     try:
         with run_lock(db, "zt_run_ai", svc.id):
-            return _zt_run_ai_locked(svc, user, client, db, llm)
+            return _zt_run_ai_locked(svc, user, client, db, llm, preview=preview)
     except RunInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -415,7 +417,9 @@ def _zt_run_ai_locked(
     client: Client,
     db: Session,
     llm: LLMClient,
-) -> ZtRunAiResponse:
+    *,
+    preview: bool = False,
+) -> ZtRunAiResponse | JSONResponse:
     # FIX F-2: create the draft (seeding rows) on first Run AI when none exists,
     # exactly what "Start assessment" does — the manual Start button still works.
     # The open-draft guard (E-3) makes this idempotent, so a re-run does not mint
@@ -464,6 +468,22 @@ def _zt_run_ai_locked(
             code: {"notes": r.notes, "current": r.maturity_stage} for code, r in rows.items()
         },
     }
+    # FIX H-6: a dry run. Build the exact payload, redact it, and hand it back
+    # WITHOUT calling the provider and without writing an llm_calls row. This is
+    # the only place an operator can answer "what client data leaves the
+    # platform?" before it actually leaves -- the spec promises that, and it is
+    # the first question a FedRAMP assessor asks. Returning a JSONResponse
+    # bypasses `response_model`, so the preview shape need not pretend to be a
+    # ZtRunAiResponse.
+    if preview:
+        return JSONResponse(
+            preview_job_payload(
+                "zt_score",
+                inputs=zt_inputs,
+                client_org_name=client_org,
+            )
+        )
+
     # FIX E-1a: inputs are fully materialized and there are no pending writes, so
     # return the pooled connection to the pool across the (synchronous) provider
     # call. Capture the ids BEFORE rollback (which expires the ORM objects), so
@@ -515,6 +535,15 @@ def _zt_run_ai_locked(
     ]
     narratives = data.get("pillar_narratives")
     narratives = narratives if isinstance(narratives, dict) else {}
+
+    # FIX E-4: persist the narrative work instead of rendering it once and
+    # dropping it. A reload used to lose all of this, which pushed consultants
+    # into re-running the AI (and re-paying for it) just to read it again.
+    a.narratives = {
+        "pillar_narratives": {str(k): str(v) for k, v in narratives.items()},
+        "executive_summary": (data.get("executive_summary") or None),
+        "roadmap_summary": (data.get("roadmap_summary") or None),
+    }
 
     a.documents_stale = True  # Work Order C3
     audit(

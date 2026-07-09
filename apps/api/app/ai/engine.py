@@ -122,6 +122,49 @@ def run_job(
     return JobResult(data=job.parser(response.content), llm_call=call_row)
 
 
+def preview_job_payload(
+    job_name: str,
+    *,
+    inputs: dict[str, Any],
+    settings: Any | None = None,
+    client_org_name: str | None = None,
+    name_hints: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Build exactly what a live run would send, run the redactor, return it.
+
+    FIX H-6. The Master Spec promises the consultant can see what leaves the
+    platform. Today redaction happens invisibly inside ``LLMClient.invoke`` and
+    the first moment an admin could inspect the egress payload is never. With
+    live mode arriving, operators need to confirm redaction quality on real
+    client data BEFORE it leaves.
+
+    This is a dry run: it constructs the payload, applies the same redactor with
+    the same settings the real call would use, and returns the redacted payload
+    plus a per-rule count of what was removed. It makes NO provider call and
+    writes NO ``llm_calls`` row -- nothing egresses.
+    """
+    from app.ai.redact import redact_payload
+    from app.config import get_settings
+
+    s = settings or get_settings()
+    job = get_job(job_name)
+    cleaned, removed_counts = redact_payload(
+        inputs,
+        mode=s.shield_redaction_mode,
+        client_org_name=client_org_name,
+        name_hints=tuple(name_hints),
+    )
+    return {
+        "job": job.name,
+        "model": job.model or s.shield_llm_model,
+        "prompt": job.prompt,
+        "redacted_payload": cleaned,
+        "redaction_counts": removed_counts,
+        "redacted_total": sum(removed_counts.values()) if removed_counts else 0,
+        "payload_bytes": len(json.dumps(cleaned)),
+    }
+
+
 def parse_json(content: str) -> Any:
     """Best-effort JSON parse of an LLM response, tolerating ```json fences."""
     text = content.strip()
