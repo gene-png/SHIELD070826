@@ -45,6 +45,13 @@ class LLMCall(UUIDPKMixin, TimestampMixin, Base):
     service_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("services.id", ondelete="SET NULL")
     )
+    # FIX H-5: attribute AI spend to a tenant so per-client usage + cost can be
+    # reported. Nullable + indexed, additive (migration 0030); no backfill. When
+    # a caller doesn't pass client_id explicitly, invoke derives it from
+    # service_id so every job type still lands a tenant.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("client.id", ondelete="SET NULL"), index=True
+    )
     purpose: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)

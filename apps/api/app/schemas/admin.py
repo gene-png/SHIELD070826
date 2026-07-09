@@ -33,6 +33,39 @@ class AdminAiStatus(BaseModel):
     model: str
     ready: bool
     detail: str
+    # FIX A-5: validate live configuration honestly rather than only reporting
+    # the mode string. `api_key_present` and `sdk_importable` are the two live
+    # preconditions; `job_models` lists the per-job model that will actually run
+    # (read from the AIJob registry), so an operator sees exactly what each job
+    # bills to. `api_key_present` is a bool only — the key itself is never sent.
+    api_key_present: bool = False
+    sdk_importable: bool = True
+    job_models: dict[str, str] = Field(default_factory=dict)
+
+
+class AdminAiUsageRow(BaseModel):
+    """One (client, month, model) slice of AI spend (FIX H-5)."""
+
+    client_id: uuid.UUID | None
+    client_name: str | None
+    month: str  # "YYYY-MM"
+    model: str
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    # None when the model has no entry in the static price table; `cost_estimated`
+    # is then False and `note` says the cost could not be estimated.
+    estimated_cost_usd: float | None
+    cost_estimated: bool
+    note: str | None = None
+
+
+class AdminAiUsageResponse(BaseModel):
+    """Per-tenant AI usage + estimated cost. Costs use a STATIC in-code price
+    table (see the endpoint); they are an estimate, not a billed figure."""
+
+    rows: list[AdminAiUsageRow]
+    note: str
 
 
 class AdminUserSummary(BaseModel):

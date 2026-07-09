@@ -83,6 +83,9 @@ export interface AttackRunAiResponse {
   coverage: AttackCoverageRow[];
   /** Batches the AI provider couldn't reach; >0 means re-run to fill the rest. */
   failed_batches?: number;
+  /** AI execution mode; "fixture" means the output is a deterministic
+   * simulation, not a real model call. May be absent on older responses. */
+  mode?: "fixture" | "live";
 }
 
 export interface TacticHeatmapEntry {

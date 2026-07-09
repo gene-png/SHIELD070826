@@ -22,6 +22,8 @@ import {
   patchCoverage,
   runAttackAi,
 } from "@/lib/attack/client";
+import { isAbortError } from "@/lib/http";
+import { SimulatedBadge } from "@/components/admin/SimulatedBadge";
 import type {
   AttackAssessment,
   AttackCatalog,
@@ -50,8 +52,7 @@ export interface AttackWorkspaceProps {
 function describeError(err: unknown): string {
   if (err instanceof AttackProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??
@@ -79,6 +80,7 @@ export function AttackWorkspace({
   const [runResult, setRunResult] = React.useState<AttackRunAiResponse | null>(
     null,
   );
+  const runAbortRef = React.useRef<AbortController | null>(null);
   const [selectedCode, setSelectedCode] = React.useState<string | null>(null);
   const [showSubs, setShowSubs] = React.useState(false);
 
@@ -208,20 +210,32 @@ export function AttackWorkspace({
   }
 
   async function onRunAi(): Promise<void> {
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     setBusy("run");
     setRunResult(null);
+    setLoadError(null);
     try {
-      const result = await runAttackAi(serviceId);
+      const result = await runAttackAi(serviceId, controller.signal);
       setRunResult(result);
       // Re-pull the assessment so the matrix reflects the AI's suggestions.
       const a = await fetchLatestAssessment(serviceId);
       setAssessment(a);
       await refreshHeatmap();
     } catch (err) {
-      setLoadError(describeError(err));
+      if (isAbortError(err)) {
+        setLoadError("AI run canceled. No changes were applied.");
+      } else {
+        setLoadError(describeError(err));
+      }
     } finally {
+      runAbortRef.current = null;
       setBusy(null);
     }
+  }
+
+  function onCancelRun(): void {
+    runAbortRef.current?.abort();
   }
 
   const readOnly =
@@ -336,7 +350,7 @@ export function AttackWorkspace({
                 capability list. Locked rows are left untouched; you stay in
                 control of the final call.
               </p>
-              <div>
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => void onRunAi()}
@@ -345,6 +359,15 @@ export function AttackWorkspace({
                 >
                   {busy === "run" ? "Running…" : "Run AI"}
                 </button>
+                {busy === "run" ? (
+                  <button
+                    type="button"
+                    onClick={onCancelRun}
+                    className="rounded-md border border-border-default px-4 py-2 text-sm font-semibold text-ink-primary hover:bg-surface-muted"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
               </div>
               {runResult ? (
                 <p className="text-sm text-ink-secondary" aria-live="polite">
@@ -364,6 +387,7 @@ export function AttackWorkspace({
                   {runResult.tools_available === 0
                     ? "No tools were available from the Tech Debt list, so only statuses were inferred."
                     : `${runResult.tools_available} tool${runResult.tools_available === 1 ? "" : "s"} available for mapping.`}
+                  {runResult.mode === "fixture" ? <SimulatedBadge /> : null}
                 </p>
               ) : null}
               {runResult && (runResult.failed_batches ?? 0) > 0 ? (

@@ -153,8 +153,71 @@ export function ZtSelfAssessment({
       <p className="text-sm text-ink-tertiary">Loading your self-assessment…</p>
     );
   }
+  // Post-submission: answers stay visible but read-only. The message thread
+  // below (rendered by the page) remains active for follow-up.
   if (submitted) {
-    return <SelfAssessmentSubmitted />;
+    return (
+      <div className="flex flex-col gap-6">
+        <SelfAssessmentSubmitted />
+        <Card>
+          <CardHeader>
+            <CardTitle>Your submitted answers</CardTitle>
+          </CardHeader>
+          <CardBody className="flex flex-col gap-4">
+            <p className="text-sm text-ink-secondary">
+              These are the responses you submitted for review. They&apos;re
+              read-only now — your consultant will follow up in the messages
+              below if anything needs another look.
+            </p>
+            {catalog.pillars.map((pillar) => (
+              <section
+                key={pillar.code}
+                className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-card p-4"
+              >
+                <h3 className="text-base font-semibold text-ink-primary">
+                  {pillar.code} · {pillar.name}
+                </h3>
+                <ul className="flex flex-col gap-3">
+                  {pillar.capabilities.map((cap) => {
+                    const ans = answersByCode[cap.code];
+                    if (!ans) return null;
+                    return (
+                      <li
+                        key={cap.code}
+                        className="rounded-md border border-border-subtle bg-surface-sunken p-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-mono text-ink-tertiary">
+                              {cap.code}
+                            </p>
+                            <p className="text-sm font-medium text-ink-primary">
+                              {cap.name}
+                            </p>
+                          </div>
+                          <ZtStagePicker
+                            value={ans.maturity_stage}
+                            stages={catalog.stages}
+                            disabled
+                            ariaLabel={`Maturity stage for ${cap.code}`}
+                            onChange={() => undefined}
+                          />
+                        </div>
+                        {ans.notes ? (
+                          <p className="mt-2 whitespace-pre-wrap text-sm text-ink-secondary">
+                            {ans.notes}
+                          </p>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+          </CardBody>
+        </Card>
+      </div>
+    );
   }
 
   const targetStages = catalog.stages.filter((s) => s.stage >= 2);

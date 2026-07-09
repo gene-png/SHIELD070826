@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.engine import run_job
-from app.ai.llm import LLMClient
+from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.attack.catalog import all_codes as attack_all_codes
 from app.audit import audit
 from app.db.session import get_db
@@ -57,7 +57,13 @@ _admin_required = Depends(require_role(UserRole.ADMIN))
 
 
 def _llm_dep() -> LLMClient:
-    return LLMClient.from_settings()
+    # FIX A-5: surface a misconfigured live LLM as a typed error, not a 500.
+    try:
+        return LLMClient.from_settings()
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 def _latest(db: Session, model, client_id: uuid.UUID):
@@ -239,18 +245,32 @@ def generate(
 
     findings, valid_techniques, valid_controls = _gather_findings(db, cid)
     client_org = None if client.legal_name == "(pending intake)" else client.legal_name
-    result = run_job(
-        db,
-        llm,
-        "risk_synthesize",
-        inputs={
-            "findings": findings,
-            "valid_techniques": sorted(valid_techniques),
-            "valid_controls": sorted(valid_controls),
-        },
-        requested_by=admin.id,
-        client_org_name=client_org,
-    )
+    risk_inputs = {
+        "findings": findings,
+        "valid_techniques": sorted(valid_techniques),
+        "valid_controls": sorted(valid_controls),
+    }
+    # FIX E-1a: inputs are materialized and there are no pending writes, so
+    # return the pooled connection to the pool across the provider call; the
+    # writes below re-acquire it. Capture admin.id BEFORE rollback (which expires
+    # the ORM object); cid is already a plain path UUID.
+    run_uid = admin.id
+    db.rollback()
+    try:
+        result = run_job(
+            db,
+            llm,
+            "risk_synthesize",
+            inputs=risk_inputs,
+            requested_by=run_uid,
+            client_id=cid,
+            client_org_name=client_org,
+        )
+    except LLMTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="the AI call timed out; nothing was changed",
+        ) from exc
     data = result.data if isinstance(result.data, dict) else {}
 
     # New version; supersede the prior current one.

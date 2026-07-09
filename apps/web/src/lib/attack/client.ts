@@ -13,13 +13,14 @@ import type {
 interface JsonRequestInit {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
+  signal?: AbortSignal;
 }
 
 async function jsonRequest<T>(
   url: string,
   init: JsonRequestInit = {},
 ): Promise<T> {
-  const { body, method = "GET" } = init;
+  const { body, method = "GET", signal } = init;
   const res = await fetch(url, {
     method,
     cache: "no-store",
@@ -28,6 +29,7 @@ async function jsonRequest<T>(
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     let payload: unknown;
@@ -102,10 +104,11 @@ export async function approveAssessment(
 
 export async function runAttackAi(
   serviceId: string,
+  signal?: AbortSignal,
 ): Promise<AttackRunAiResponse> {
   return jsonRequest<AttackRunAiResponse>(
     `/api/proxy/attack/services/${serviceId}/run-ai`,
-    { method: "POST" },
+    { method: "POST", signal },
   );
 }
 

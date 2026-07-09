@@ -490,9 +490,61 @@ The negative control matters: a suite that has never failed is not evidence of a
 4. **Live AI still unproven against the real API.** No `ANTHROPIC_API_KEY`. Contract tests (A-6) land in Sprint 2 and are the actual guard against the A-2/A-4 class of defect; the gated live smoke test remains armed and skipping.
 5. **e2e specs for the new flows** (playbook export gate, extraction errors) are Sprint 2 per the plan. Sprint 1's proof is unit-level plus the smoke suite confirming the stack still boots and serves.
 
-### Sprint 2 — Solid Operations
+### Sprint 2 — Solid Operations — STEP 1 ✅ PASS (9 of 19 fixes)
 
-> _Not started._
+**Executed 2026-07-09.** Sprint 2 is being landed in steps because five fixes all want `ai/llm.py`, `ai/engine.py` and `db/session.py` at once. Step 1 covers E-1, E-2, A-5, E-5, H-5, G-3, H-2, D-1, D-2, D-3.
+
+**Subagents (Opus, disjoint ownership).**
+
+| Subagent   | Fixes                              | Owned files                                                                                                                |
+| ---------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| AI runtime | E-1, E-2, A-5, E-5 backend, H-5    | `ai/llm.py`, `ai/engine.py`, `db/session.py`, `models/llm_call.py`, `routes/admin.py`, run-ai call sites, migration `0030` |
+| Web        | D-1, D-2, D-3, E-5 web, E-1 client | `apps/web/src/**` only                                                                                                     |
+| Security   | G-3, H-2                           | `config.py`, `main.py`, `middleware/ratelimit.py`, `routes/auth.py`, `.env.example`                                        |
+
+**Tests (quiescent tree).**
+
+| Command                                    | Result                                                                 |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| `python -m pytest`                         | **520 passed, 8 skipped, 0 failed**, EXIT=0 (baseline 497 → +23 tests) |
+| `ruff check app tests`                     | clean                                                                  |
+| `black --check app tests`                  | clean, 175 files                                                       |
+| `bandit -c pyproject.toml -r app`          | **High: 0** (Medium: 2, both pre-existing, untouched files)            |
+| `alembic upgrade → downgrade -1 → upgrade` | `client_id` added nullable + indexed, removed cleanly, re-added        |
+| Migration in real Postgres container       | `alembic_version = 0030`, `llm_calls.client_id` present                |
+| `tsc --noEmit` (web, in container)         | **zero errors** across 26 changed files                                |
+| `prettier --check` (all changed files)     | clean                                                                  |
+| Playwright smoke vs rebuilt stack          | **3 passed, EXIT=0**                                                   |
+
+**The E-2 proof, and why it took two attempts.** The pre-existing test (`test_invoke_records_failure_with_error_message`) called `db.commit()` itself and read the row back in the _same_ session — a commit no production path performs after a failure. It passed while proving nothing. The rewritten test commits nothing and reads from a fresh session.
+
+To prove the new test is honest I reverted the fix — and my first revert was **wrong**: I swapped `open_autonomous_session(...)` for `db` but left the new `commit()` calls, so the request session committed, the row persisted, and the test _passed_. That looked like evidence the test was vacuous. Only a faithful revert (request session **and** `flush()`-only, no commit) produced the true failure:
+
+```
+sqlalchemy.exc.NoResultFound: No row was found when one was required
+FAILED tests/unit/test_llm_client.py::test_invoke_records_failure_with_error_message
+```
+
+Reverting the line that _looks like_ the fix is not the same as reverting the fix.
+
+**Design decisions worth keeping.**
+
+- `open_autonomous_session(bind=...)` reuses the module `SessionLocal` and binds to the **caller's** engine. The test suite overrides `get_db` with per-test engines, so a naively autonomous session would have written the audit row into a different database and the E-2 test would have passed for the wrong reason. `expire_on_commit=False` keeps the detached row's columns readable so `JobResult.llm_call` still works for every caller.
+- E-1's connection release is _observed_, not asserted by proxy: `test_pooled_connection_released_across_provider_call` probes `engine.pool.checkedout()` from **inside** the provider call and requires 0.
+- `db.rollback()` (to return the connection) also **expires every ORM object the route holds**. The agent captured the needed ids before the rollback. Missing this would have produced intermittent failures under load, not a clean test failure.
+- The `mode` field defaults to `"fixture"`. That fails **safe**: a route that forgets to set it badges its output as simulated rather than passing fixture data off as real analysis.
+- H-2's limiter is applied by path-matching middleware in `main.py`, so per-user AI limits reached the five run-ai endpoints **without editing a single route file** another agent owned. It adds no dependency (`redis>=5.1` was already declared and unused), **fails open** if Redis is down, and is **off by default** so the suite stays inert without touching `conftest.py`.
+- G-3 proof: reverting the guard yields `Failed: DID NOT RAISE RuntimeError` — production boots in fixture mode today.
+
+**Pass/fail: PASS for Step 1.**
+
+**Remaining in Sprint 2 (10 fixes):** A-6 (contract tests), C-3–C-8, E-3, E-4, F-1, F-2, H-6.
+
+**Follow-ups / new findings.**
+
+1. **`main`'s Web CI job is already failing on two steps**, independent of this work: `prettier --check` flags 17 pre-existing files at HEAD (prettier 3.9.4, the exact version pinned in `pnpm-lock.yaml`), and `next lint` crashes with "Converting circular structure to JSON" on a pristine checkout. Verified by stashing all work and re-running. Folded into H-4 (Sprint 3). Not silently fixed here.
+2. **Two self-inflicted environment errors, recorded for honesty.** (a) I patched `llm.py` while a background `pytest` was mid-run, contaminating it; killed, verified no `TEMP` markers survived, re-ran clean. (b) I ran `pnpm install` inside the web container to obtain `tsc`, which resolved a second Next variant into the pnpm store and broke the dev server with `Cannot find module '../lib/picocolors'`. Rebuilt the `node-modules-root`/`node-modules-web` volumes from the lockfile. Neither touched a line of the deliverable.
+3. The AI-runtime subagent stalled for ~20 minutes on a full-suite run and was stopped; its work was already complete, and I validated every claim directly rather than resuming it.
 
 ### Sprint 3 — Complete Deliverables and Truth
 

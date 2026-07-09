@@ -40,6 +40,22 @@ class LLMConfigurationError(RuntimeError):
     call — e.g. live mode selected but the provider SDK cannot be imported."""
 
 
+class LLMTimeoutError(RuntimeError):
+    """The provider call timed out or the connection failed (FIX E-1b). Routes
+    map this to a typed 504; the audit row is still written FAILED and nothing
+    is applied."""
+
+
+def _is_provider_timeout(exc: BaseException) -> bool:
+    """True for an Anthropic timeout / connection failure. The SDK is imported
+    LAZILY so it never becomes a hard dependency of fixture mode."""
+    try:
+        import anthropic
+    except Exception:  # noqa: BLE001 - SDK absent (fixture mode); can't be a timeout
+        return False
+    return isinstance(exc, (anthropic.APITimeoutError, anthropic.APIConnectionError))
+
+
 class LLMResponse:
     """Provider response container. Token counts may be None if the provider
     didn't report them (fixture mode supplies them; some providers don't)."""
@@ -129,7 +145,7 @@ class AnthropicProvider:
 
     def __init__(self, *, model: str, api_key: str) -> None:
         if not api_key:
-            raise RuntimeError(
+            raise LLMConfigurationError(
                 "ANTHROPIC_API_KEY is not set. Either set it in .env or switch "
                 "SHIELD_LLM_MODE to 'fixture'."
             )
@@ -210,7 +226,7 @@ def _build_provider(settings: Settings) -> LLMProvider:
             model=settings.shield_llm_model,
             api_key=settings.anthropic_api_key,
         )
-    raise RuntimeError(
+    raise LLMConfigurationError(
         f"LLM provider {settings.shield_llm_provider!r} is not implemented in v1. "
         "Set SHIELD_LLM_PROVIDER=anthropic or SHIELD_LLM_MODE=fixture."
     )
@@ -223,6 +239,13 @@ class LLMClient:
     def __init__(self, provider: LLMProvider, settings: Settings | None = None) -> None:
         self.provider = provider
         self._settings = settings or get_settings()
+
+    @property
+    def mode(self) -> LLMMode:
+        """The active LLM mode, for the run-ai responses to badge simulated
+        output (FIX E-5). `fixture` = deterministic canned results; `live` = a
+        real provider call."""
+        return "fixture" if self._settings.shield_llm_mode == "fixture" else "live"
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> LLMClient:
@@ -251,6 +274,7 @@ class LLMClient:
         payload: dict[str, Any],
         requested_by: uuid.UUID,
         service_id: uuid.UUID | None = None,
+        client_id: uuid.UUID | None = None,
         prompt_version: str = "v1",
         redaction_mode: RedactionMode | None = None,
         client_org_name: str | None = None,
@@ -260,8 +284,28 @@ class LLMClient:
     ) -> tuple[LLMResponse, LLMCall]:
         """Redact, write the llm_calls row, call the provider, finalize the row.
 
-        `model` / `max_tokens` are per-job overrides forwarded to the provider;
-        None means the provider's configured default."""
+        FIX E-2 — the audit trail must survive a request rollback. The llm_calls
+        row is written in its OWN short-lived session (an autonomous
+        transaction): the RUNNING row is committed BEFORE the provider call and
+        the COMPLETED/FAILED update is committed AFTER, both independent of the
+        caller's transaction. So when a request errors and its transaction rolls
+        back, the FAILED record still stands. The row is returned DETACHED (its
+        session is closed); callers read its fields (e.g. `.id`) but must not
+        re-add it to their session.
+
+        `db` is used ONLY to resolve the engine bind for that autonomous session
+        (`db.get_bind()` does not check out a connection) — this invoke never
+        queries or writes through `db`, so the caller can (and the routes do)
+        return the pooled connection to the pool across the provider call
+        (FIX E-1a).
+
+        `client_id` attributes the spend to a tenant (FIX H-5); when omitted it
+        is derived from `service_id`. `model` / `max_tokens` are per-job
+        overrides forwarded to the provider; None means the provider default."""
+        from app.db.session import open_autonomous_session
+        from app.models._common import utcnow as _utcnow
+        from app.models.service import Service
+
         mode = redaction_mode or self._settings.shield_redaction_mode  # type: ignore[assignment]
         cleaned_payload, removed_counts = redact_payload(
             payload,
@@ -280,51 +324,69 @@ class LLMClient:
         # must be truthful about which model billed.
         effective_model = model or self.provider.model
 
-        row = LLMCall(
-            service_id=service_id,
-            purpose=purpose,
-            prompt_version=prompt_version,
-            provider=self.provider.name,
-            model=effective_model,
-            mode=call_mode,
-            status=LLMCallStatus.RUNNING,
-            requested_by=requested_by,
-            redacted_counts=removed_counts or None,
-            correlation_id=correlation_id_var.get(),
-        )
-        db.add(row)
-        db.flush()
-
-        # Pass the purpose into the fixture so tests can register per-purpose
-        # responses. Real providers ignore it.
-        send_payload = {**cleaned_payload, "__purpose__": purpose}
-
-        started = time.monotonic()
+        log_db = open_autonomous_session(db.get_bind())
         try:
-            response = self.provider.complete(
-                prompt, send_payload, model=model, max_tokens=max_tokens
-            )
-        except Exception as exc:  # noqa: BLE001 - boundary; log + record + re-raise
-            row.status = LLMCallStatus.FAILED
-            row.error_message = f"{type(exc).__name__}: {exc}"
-            row.duration_ms = int((time.monotonic() - started) * 1000)
-            db.flush()
-            _log.error(
-                "llm_call_failed",
+            # FIX H-5: derive the tenant from the service when a caller didn't
+            # pass it explicitly (e.g. the tech-debt extract path), so every job
+            # type still attributes its spend.
+            resolved_client_id = client_id
+            if resolved_client_id is None and service_id is not None:
+                svc = log_db.get(Service, service_id)
+                resolved_client_id = svc.client_id if svc is not None else None
+
+            row = LLMCall(
+                service_id=service_id,
+                client_id=resolved_client_id,
                 purpose=purpose,
+                prompt_version=prompt_version,
                 provider=self.provider.name,
-                error=row.error_message,
+                model=effective_model,
+                mode=call_mode,
+                status=LLMCallStatus.RUNNING,
+                requested_by=requested_by,
+                redacted_counts=removed_counts or None,
+                correlation_id=correlation_id_var.get(),
             )
-            raise
+            log_db.add(row)
+            # Commit the RUNNING row BEFORE the provider call so a crash mid-call
+            # still leaves a record; the commit also releases this session's
+            # connection, so nothing is held across the provider call.
+            log_db.commit()
 
-        row.status = LLMCallStatus.COMPLETED
-        row.input_tokens = response.input_tokens
-        row.output_tokens = response.output_tokens
-        row.duration_ms = int((time.monotonic() - started) * 1000)
-        from app.models._common import utcnow as _utcnow
+            # Pass the purpose into the fixture so tests can register per-purpose
+            # responses. Real providers ignore it.
+            send_payload = {**cleaned_payload, "__purpose__": purpose}
 
-        row.completed_at = _utcnow()
-        db.flush()
+            started = time.monotonic()
+            try:
+                response = self.provider.complete(
+                    prompt, send_payload, model=model, max_tokens=max_tokens
+                )
+            except Exception as exc:  # noqa: BLE001 - boundary; log + record + re-raise
+                row.status = LLMCallStatus.FAILED
+                row.error_message = f"{type(exc).__name__}: {exc}"
+                row.duration_ms = int((time.monotonic() - started) * 1000)
+                log_db.commit()  # FAILED row persists autonomously — survives request rollback
+                _log.error(
+                    "llm_call_failed",
+                    purpose=purpose,
+                    provider=self.provider.name,
+                    error=row.error_message,
+                )
+                # FIX E-1b: a provider timeout / connection failure becomes a
+                # typed error the routes map to 504; other failures re-raise as-is.
+                if _is_provider_timeout(exc):
+                    raise LLMTimeoutError("the AI call timed out; nothing was changed") from exc
+                raise
+
+            row.status = LLMCallStatus.COMPLETED
+            row.input_tokens = response.input_tokens
+            row.output_tokens = response.output_tokens
+            row.duration_ms = int((time.monotonic() - started) * 1000)
+            row.completed_at = _utcnow()
+            log_db.commit()
+        finally:
+            log_db.close()
 
         _log.info(
             "llm_call_completed",

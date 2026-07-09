@@ -178,10 +178,6 @@ export function CsfSelfAssessment({
       <p className="text-sm text-ink-tertiary">Loading your self-assessment…</p>
     );
   }
-  if (submitted) {
-    return <SelfAssessmentSubmitted />;
-  }
-
   // Coverage is over the in-scope (profile-filtered) subcategories only.
   const inScopeCodes = new Set(
     filteredCatalog.functions.flatMap((fn) =>
@@ -196,6 +192,34 @@ export function CsfSelfAssessment({
     ? (PROFILE_LABEL[assessment.client_profile] ?? null)
     : null;
   const targetTiers = catalog.tiers.filter((t) => t.tier >= 2);
+
+  // Post-submission: answers stay visible but read-only. The message thread
+  // below (rendered by the page) remains active for follow-up.
+  if (submitted) {
+    return (
+      <div className="flex flex-col gap-6">
+        <SelfAssessmentSubmitted />
+        <Card>
+          <CardHeader>
+            <CardTitle>Your submitted answers</CardTitle>
+          </CardHeader>
+          <CardBody>
+            <p className="mb-4 text-sm text-ink-secondary">
+              These are the responses you submitted for review. They&apos;re
+              read-only now — your consultant will follow up in the messages
+              below if anything needs another look.
+            </p>
+            <CsfQuestionnaire
+              catalog={filteredCatalog}
+              answersByCode={answersByCode}
+              onAnswerUpdate={onAnswerUpdate}
+              readOnly
+            />
+          </CardBody>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">

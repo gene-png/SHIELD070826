@@ -36,3 +36,23 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def open_autonomous_session(bind: object | None = None) -> Session:
+    """A short-lived session for an AUTONOMOUS transaction, independent of any
+    request-scoped session (FIX E-2: the llm_calls audit trail must survive a
+    request rollback).
+
+    Reuses the module `SessionLocal`/engine — it does NOT build a second engine.
+    `bind` pins it to a specific engine so the audit row lands in the same
+    database the caller is using: production callers share the module engine,
+    but the test suite overrides `get_db` with per-test engines, so we bind to
+    the caller's engine via `Session.get_bind()`.
+
+    `expire_on_commit=False` so the committed row's column values stay readable
+    after this session closes — `invoke()` returns the row detached and callers
+    (and JobResult.llm_call) read its fields without a live session.
+    """
+    if bind is not None:
+        return SessionLocal(bind=bind, expire_on_commit=False)
+    return SessionLocal(expire_on_commit=False)

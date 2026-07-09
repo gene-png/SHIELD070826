@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
-from app.ai.llm import LLMClient
+from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
 from app.db.session import get_db
 from app.dependencies import current_client, current_user, require_role
@@ -362,7 +362,15 @@ def get_interview_questionnaire(
 
 
 def _llm_dep() -> LLMClient:
-    return LLMClient.from_settings()
+    # FIX A-5: a misconfigured live LLM (missing key / unimplemented provider)
+    # raises the typed LLMConfigurationError; surface it through the API's typed
+    # error convention rather than a generic "internal error".
+    try:
+        return LLMClient.from_settings()
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 @router.post(
@@ -423,21 +431,35 @@ def run_ai(
         return iv if 1 <= iv <= max_stage else None
 
     client_org = None if client.legal_name == "(pending intake)" else client.legal_name
-    result = run_job(
-        db,
-        llm,
-        "zt_score",
-        inputs={
-            "framework": a.framework.value,
-            "capabilities": sorted(rows),
-            "answers": {
-                code: {"notes": r.notes, "current": r.maturity_stage} for code, r in rows.items()
-            },
+    zt_inputs = {
+        "framework": a.framework.value,
+        "capabilities": sorted(rows),
+        "answers": {
+            code: {"notes": r.notes, "current": r.maturity_stage} for code, r in rows.items()
         },
-        requested_by=user.id,
-        service_id=svc.id,
-        client_org_name=client_org,
-    )
+    }
+    # FIX E-1a: inputs are fully materialized and there are no pending writes, so
+    # return the pooled connection to the pool across the (synchronous) provider
+    # call. Capture the ids BEFORE rollback (which expires the ORM objects), so
+    # reading them as args doesn't reload + re-check-out a connection.
+    run_uid, run_sid, run_cid = user.id, svc.id, client.id
+    db.rollback()
+    try:
+        result = run_job(
+            db,
+            llm,
+            "zt_score",
+            inputs=zt_inputs,
+            requested_by=run_uid,
+            service_id=run_sid,
+            client_id=run_cid,
+            client_org_name=client_org,
+        )
+    except LLMTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="the AI call timed out; nothing was changed",
+        ) from exc
     data = result.data if isinstance(result.data, dict) else {}
 
     for sugg in data.get("capabilities", []):
@@ -489,6 +511,7 @@ def run_ai(
         pillar_narratives={str(k): str(v) for k, v in narratives.items()},
         executive_summary=(data.get("executive_summary") or None),
         roadmap_summary=(data.get("roadmap_summary") or None),
+        mode=llm.mode,
     )
 
 

@@ -31,6 +31,8 @@ from app.models.service_request import ServiceRequest, ServiceType
 from app.models.user import User, UserRole
 from app.schemas.admin import (
     AdminAiStatus,
+    AdminAiUsageResponse,
+    AdminAiUsageRow,
     AdminArtifactRow,
     AdminClientCreateRequest,
     AdminClientListResponse,
@@ -647,38 +649,163 @@ def get_service(
 def ai_status(_admin: Annotated[User, _admin_required]) -> AdminAiStatus:
     """Report whether AI features will actually run a live call.
 
-    `ready` is true only when a real provider call will be made. Fixture mode
-    (and live mode missing its key) report ready=false with a reason. The API
-    key itself is never returned.
+    `ready` is true only when a real provider call will be made. It VALIDATES the
+    live preconditions (FIX A-5): the API key is present and the provider SDK is
+    importable, and lists the per-job model that will actually run (from the
+    AIJob registry). It never performs a live ping and never returns the key.
+
+    Fixture mode reports ready=false with the honest fixture-mode explanation
+    (FIX E-5: fixtures are deterministic simulations, not "disabled").
     """
+    from app.ai.engine import get_job, registered_jobs
+
     s = get_settings()
     mode = s.shield_llm_mode
     provider = s.shield_llm_provider
     model = s.shield_llm_model
 
+    # Per-job models actually in effect (a job may pin a cheaper model; None
+    # falls back to the configured default). Read from the registry, not guessed.
+    job_models = {name: (get_job(name).model or model) for name in registered_jobs()}
+
+    # Is the provider SDK importable? Checked lazily so fixture mode never makes
+    # the SDK a hard dependency; a live deploy missing it must fail honestly here
+    # rather than with a generic 500 on the first Run-AI click.
+    sdk_importable = True
+    if provider == "anthropic":
+        try:
+            import anthropic  # noqa: F401
+        except Exception:  # noqa: BLE001 - any import failure means "not importable"
+            sdk_importable = False
+    api_key_present = bool(s.anthropic_api_key)
+
+    common = {
+        "mode": mode,
+        "provider": provider,
+        "model": model,
+        "api_key_present": api_key_present,
+        "sdk_importable": sdk_importable,
+        "job_models": job_models,
+    }
+
     if mode != "live":
         return AdminAiStatus(
-            mode=mode,
-            provider=provider,
-            model=model,
             ready=False,
             detail=(
-                "Running in fixture mode — AI features are disabled. Set "
-                "SHIELD_LLM_MODE=live and ANTHROPIC_API_KEY to enable."
+                "AI suggestions are simulated (deterministic fixtures) for demo "
+                "and testing; set SHIELD_LLM_MODE=live for real analysis."
             ),
+            **common,
         )
-    if provider == "anthropic" and not s.anthropic_api_key:
+
+    problems: list[str] = []
+    if provider == "anthropic" and not api_key_present:
+        problems.append("ANTHROPIC_API_KEY is not set")
+    if not sdk_importable:
+        problems.append("the 'anthropic' SDK cannot be imported")
+    if problems:
         return AdminAiStatus(
-            mode=mode,
-            provider=provider,
-            model=model,
             ready=False,
-            detail="Live mode is on but ANTHROPIC_API_KEY is not set.",
+            detail="Live mode is on but " + "; ".join(problems) + ".",
+            **common,
         )
     return AdminAiStatus(
-        mode=mode,
-        provider=provider,
-        model=model,
         ready=True,
         detail=f"Live AI configured ({provider}/{model}).",
+        **common,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AI usage + estimated cost (FIX H-5)
+# ---------------------------------------------------------------------------
+
+# STATIC estimate only — USD per 1,000,000 tokens, (input, output). This is a
+# point-in-time price sheet kept in code intentionally (config.py is owned
+# elsewhere and prices are not a security/runtime knob). Update on price changes.
+# A model absent here yields a null cost that is reported as unestimated.
+_MODEL_PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+}
+
+
+def _estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    price = _MODEL_PRICES_USD_PER_MTOK.get(model)
+    if price is None:
+        return None
+    in_rate, out_rate = price
+    return round(input_tokens / 1_000_000 * in_rate + output_tokens / 1_000_000 * out_rate, 6)
+
+
+@router.get(
+    "/ai-usage",
+    response_model=AdminAiUsageResponse,
+    summary="Per-tenant AI usage + estimated cost, by month + model (admin)",
+)
+def ai_usage(
+    _admin: Annotated[User, _admin_required],
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminAiUsageResponse:
+    """Calls, tokens, and estimated cost per client per month (broken out by
+    model, since price is per-model). Cost is a STATIC estimate from an in-code
+    price sheet; a model with no listed price reports a null cost.
+    """
+    from app.models.llm_call import LLMCall
+
+    rows = db.execute(
+        select(
+            LLMCall.client_id,
+            LLMCall.model,
+            LLMCall.input_tokens,
+            LLMCall.output_tokens,
+            LLMCall.requested_at,
+        )
+    ).all()
+
+    # Aggregate in Python (cross-dialect: no DB-specific date_trunc/strftime).
+    agg: dict[tuple[uuid.UUID | None, str, str], dict[str, int]] = {}
+    for client_id, model, in_tok, out_tok, requested_at in rows:
+        month = requested_at.strftime("%Y-%m")
+        key = (client_id, month, model)
+        bucket = agg.setdefault(key, {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+        bucket["calls"] += 1
+        bucket["input_tokens"] += int(in_tok or 0)
+        bucket["output_tokens"] += int(out_tok or 0)
+
+    # Resolve client display names once.
+    client_ids = {cid for (cid, _m, _model) in agg if cid is not None}
+    names: dict[uuid.UUID, str] = {}
+    if client_ids:
+        for c in db.execute(select(Client).where(Client.id.in_(client_ids))).scalars().all():
+            names[c.id] = c.legal_name
+
+    out: list[AdminAiUsageRow] = []
+    for (client_id, month, model), bucket in agg.items():
+        cost = _estimate_cost_usd(model, bucket["input_tokens"], bucket["output_tokens"])
+        out.append(
+            AdminAiUsageRow(
+                client_id=client_id,
+                client_name=names.get(client_id) if client_id is not None else None,
+                month=month,
+                model=model,
+                calls=bucket["calls"],
+                input_tokens=bucket["input_tokens"],
+                output_tokens=bucket["output_tokens"],
+                estimated_cost_usd=cost,
+                cost_estimated=cost is not None,
+                note=(None if cost is not None else f"No price on file for model {model!r}."),
+            )
+        )
+    # Stable, readable ordering: newest month first, then client, then model.
+    out.sort(key=lambda r: (r.month, str(r.client_id), r.model), reverse=True)
+
+    return AdminAiUsageResponse(
+        rows=out,
+        note=(
+            "Costs are a static in-code estimate (USD per 1M tokens), not a billed "
+            "figure; rows with an unlisted model report a null cost."
+        ),
     )

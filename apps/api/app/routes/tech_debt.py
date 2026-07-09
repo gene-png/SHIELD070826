@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.ai.llm import LLMClient
+from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
 from app.db.session import get_db
 from app.dependencies import current_client, current_user, require_role
@@ -83,7 +83,13 @@ _admin_required = Depends(require_role(UserRole.ADMIN))
 # backed client via FastAPI dependency overrides; production gets the
 # settings-built client lazily.
 def _llm_dep() -> LLMClient:
-    return LLMClient.from_settings()
+    # FIX A-5: surface a misconfigured live LLM as a typed error, not a 500.
+    try:
+        return LLMClient.from_settings()
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 @router.post(
@@ -173,17 +179,40 @@ def extract_capability_list(
             detail=(f"Inventory MIME {artifact.mime_type!r} is not supported. " "Use CSV or XLSX."),
         )
 
+    # FIX E-1a: gather the tenant context inputs first, then return the pooled
+    # connection to the pool across the (synchronous) extract + provider call.
+    # Load + detach the artifact so extract_capabilities reads cached fields
+    # (never a lazy DB reload that would re-check-out a connection); the writes
+    # below re-acquire. extract_capabilities otherwise touches `db` only to bind
+    # invoke's autonomous audit session.
+    extract_client_org = client_org_name_for_tenant(db, client.id)
+    extract_name_hints = name_hints_for_tenant(db, client.id)
+    run_sid = svc.id
+    # Load the fields extract_capabilities reads, then DETACH artifact + user, so
+    # neither triggers a lazy reload that would re-check-out a connection across
+    # the provider call. (extract_capabilities reads requested_by.id internally.)
+    _ = (user.id, artifact.id, artifact.title, artifact.mime_type, artifact.file_storage_key)
+    db.expunge(artifact)
+    db.expunge(user)
+    db.rollback()
     try:
         result = extract_capabilities(
             db=db,
             storage=storage,
             artifact=artifact,
             requested_by=user,
-            service_id=svc.id,
-            client_org_name=client_org_name_for_tenant(db, client.id),
-            name_hints=name_hints_for_tenant(db, client.id),
+            service_id=run_sid,
+            client_org_name=extract_client_org,
+            name_hints=extract_name_hints,
             llm=llm,
         )
+    except LLMTimeoutError as exc:
+        # FIX E-1b: a provider timeout / connection failure -> typed 504; the
+        # llm_calls row is already recorded FAILED and nothing was applied.
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="the AI call timed out; nothing was changed",
+        ) from exc
     except UnsupportedInventoryFormat as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

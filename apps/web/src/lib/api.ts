@@ -17,6 +17,14 @@ const BASE_URL = process.env.API_BASE_URL ?? "http://api:8000";
 
 export const ACTIVE_CLIENT_COOKIE = "shield_active_client_id";
 
+/**
+ * Default upstream timeout. Bounds every call so a hung backend surfaces as a
+ * clean 504 instead of leaving the UI stuck on "Running" forever (and never
+ * lets a late response commit after the user already saw an error). Long AI
+ * runs can raise this per-call via `timeoutMs`.
+ */
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 type Json = Record<string, unknown> | unknown[];
 
 export interface ApiOptions {
@@ -27,6 +35,10 @@ export interface ApiOptions {
   cache?: RequestCache;
   /** Override or suppress the cookie-derived X-Client-Id. Pass empty string to suppress. */
   clientId?: string;
+  /** Client-side timeout in ms. Defaults to DEFAULT_TIMEOUT_MS; 0 disables it. */
+  timeoutMs?: number;
+  /** Caller-supplied abort signal, chained with the timeout above. */
+  signal?: AbortSignal;
 }
 
 export class ApiError extends Error {
@@ -72,12 +84,40 @@ export async function apiFetch<T>(
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
   }
-  const res = await fetch(url, {
-    method: opts.method ?? "GET",
-    headers,
-    body,
-    cache: opts.cache ?? "no-store",
-  });
+  // Bound the call with an abort timeout, chained with any caller signal so
+  // either source cancels the request.
+  const controller = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer =
+    timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  if (opts.signal) {
+    if (opts.signal.aborted) {
+      controller.abort();
+    } else {
+      opts.signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: opts.method ?? "GET",
+      headers,
+      body,
+      cache: opts.cache ?? "no-store",
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError(504, undefined, {
+        error: { message: "The request timed out. Please try again." },
+      });
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   const correlationId = res.headers.get("X-Request-ID") ?? undefined;
   if (!res.ok) {
     let payload: unknown = undefined;

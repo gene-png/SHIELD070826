@@ -79,6 +79,28 @@ export const ASSESSMENT_SERVICE_TYPES: ReadonlyArray<ServiceType> = [
   "zero_trust_dod",
 ];
 
+/** Service types that open the interactive client self-assessment page. */
+export const SELF_ASSESSMENT_SERVICE_TYPES: ReadonlyArray<ServiceType> = [
+  "nist_csf",
+  "zero_trust_cisa",
+  "zero_trust_dod",
+];
+
+/**
+ * Client-facing destination for a service. CSF/ZT open the interactive
+ * self-assessment (read-only once submitted); everything else opens the
+ * lightweight detail page (status + message thread).
+ */
+export function clientAssessmentHref(
+  serviceType: ServiceType,
+  serviceId: string,
+): string {
+  if (SELF_ASSESSMENT_SERVICE_TYPES.includes(serviceType)) {
+    return `/self-assessment/${serviceId}?type=${serviceType}`;
+  }
+  return `/assessments/${serviceId}`;
+}
+
 export interface ClientProfilePatch {
   legal_name?: string;
   dba_name?: string;

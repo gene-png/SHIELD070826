@@ -124,6 +124,9 @@ class AttackRunAiResponse(BaseModel):
     # Non-fatal advisories surfaced to the admin (FIX G-2). E.g. the client has
     # no APPROVED/RELEASED capability list, so the mapping can cite no tools.
     warnings: list[str] = Field(default_factory=list)
+    # FIX E-5: "fixture" = deterministic simulated results; "live" = a real
+    # provider call. The web UI badges simulated output on "fixture".
+    mode: str = "fixture"
 
 
 class AttackCoveragePatch(BaseModel):

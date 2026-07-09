@@ -19,6 +19,8 @@ import {
   runCsfAi,
   seedProfiles,
 } from "@/lib/csf/client";
+import { isAbortError } from "@/lib/http";
+import { SimulatedBadge } from "@/components/admin/SimulatedBadge";
 
 import { CsfDimensionEditor } from "./CsfDimensionEditor";
 import type {
@@ -36,8 +38,7 @@ export interface CsfPlaybookPanelProps {
 function describeError(err: unknown): string {
   if (err instanceof CsfProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??
@@ -123,6 +124,7 @@ export function CsfPlaybookPanel({
   const [exportResult, setExportResult] =
     React.useState<CsfPlaybookExport | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const runAbortRef = React.useRef<AbortController | null>(null);
 
   const reload = React.useCallback(async () => {
     const ent = await fetchEnterpriseProfile(serviceId);
@@ -160,17 +162,28 @@ export function CsfPlaybookPanel({
   }
 
   async function onRunAi(): Promise<void> {
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     setBusy("run");
     setError(null);
     setRunResult(null);
     try {
-      setRunResult(await runCsfAi(serviceId));
+      setRunResult(await runCsfAi(serviceId, controller.signal));
       await reload();
     } catch (err) {
-      setError(describeError(err));
+      if (isAbortError(err)) {
+        setError("AI run canceled. No changes were applied.");
+      } else {
+        setError(describeError(err));
+      }
     } finally {
+      runAbortRef.current = null;
       setBusy(null);
     }
+  }
+
+  function onCancelRun(): void {
+    runAbortRef.current?.abort();
   }
 
   async function onExport(): Promise<void> {
@@ -218,14 +231,25 @@ export function CsfPlaybookPanel({
                 {busy === "seed" ? "Seeding…" : "Seed Working Profiles"}
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => void onRunAi()}
-                disabled={busy !== null || readOnly}
-                className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {busy === "run" ? "Running…" : "Run AI (csf_score)"}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => void onRunAi()}
+                  disabled={busy !== null || readOnly}
+                  className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busy === "run" ? "Running…" : "Run AI (csf_score)"}
+                </button>
+                {busy === "run" ? (
+                  <button
+                    type="button"
+                    onClick={onCancelRun}
+                    className="rounded-md border border-border-default px-4 py-2 text-sm font-semibold text-ink-primary hover:bg-surface-muted"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </>
             )}
             {seeded ? (
               <button
@@ -276,7 +300,7 @@ export function CsfPlaybookPanel({
                 .size === 1
                 ? "y"
                 : "ies"}
-              .
+              .{runResult.mode === "fixture" ? <SimulatedBadge /> : null}
             </p>
           ) : null}
 

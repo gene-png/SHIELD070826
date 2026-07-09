@@ -5,11 +5,13 @@ import Link from "next/link";
 
 import { Card, CardBody, EmptyState } from "@shield/design-system";
 
+import { ClientSwitcher } from "@/components/site/ClientSwitcher";
 import { workspaceHref } from "@/lib/admin/types";
 import { SERVICE_LABELS, type ServiceType } from "@/lib/intake/types";
 import {
   describeMessagesError,
   fetchInbox,
+  MessagesProxyError,
   type InboxThread,
 } from "@/lib/messages/client";
 
@@ -67,6 +69,7 @@ export function InboxView(): JSX.Element {
   const [threads, setThreads] = React.useState<InboxThread[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [needsClient, setNeedsClient] = React.useState(false);
 
   React.useEffect(() => {
     let active = true;
@@ -75,7 +78,14 @@ export function InboxView(): JSX.Element {
         if (active) setThreads(r.threads);
       })
       .catch((err) => {
-        if (active) setError(describeMessagesError(err));
+        if (!active) return;
+        // No active client selected: the backend requires X-Client-Id for this
+        // role and returns 400. Show the switcher instead of the raw error.
+        if (err instanceof MessagesProxyError && err.status === 400) {
+          setNeedsClient(true);
+          return;
+        }
+        setError(describeMessagesError(err));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -86,6 +96,14 @@ export function InboxView(): JSX.Element {
   }, []);
 
   if (loading) return <p className="text-sm text-ink-tertiary">Loading…</p>;
+  if (needsClient)
+    return (
+      <EmptyState
+        title="Pick a client first"
+        description="Messages are scoped to one client. Choose one to see their threads:"
+        action={<ClientSwitcher />}
+      />
+    );
   if (error)
     return (
       <p className="text-sm text-status-danger-fg" role="alert">
@@ -96,7 +114,7 @@ export function InboxView(): JSX.Element {
     return (
       <EmptyState
         title="No message threads"
-        description="Threads appear here once a service for the selected client has a conversation. Pick a client from the switcher to see theirs."
+        description="Threads appear here once a service for the selected client has a conversation."
       />
     );
 

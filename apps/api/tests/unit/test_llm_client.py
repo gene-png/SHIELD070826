@@ -39,7 +39,10 @@ def _new_admin(db: Session) -> User:
         display_name="Admin",
     )
     db.add(u)
-    db.flush()
+    # Commit (not flush): invoke writes the llm_calls row in its OWN autonomous
+    # session on a separate connection (FIX E-2), which must SEE this admin and
+    # must not deadlock on an uncommitted write held by the request session.
+    db.commit()
     return u
 
 
@@ -110,9 +113,15 @@ def test_invoke_records_failure_with_error_message(db_factory) -> None:
                 payload={"a": 1},
                 requested_by=admin.id,
             )
-        db.commit()
+        # Deliberately NO db.commit() here: production never commits the request
+        # session after a failure — get_db just closes (rolls back). The old test
+        # committed on production's behalf and so proved nothing. The FAILED row
+        # must already be durable via invoke's autonomous session.
 
-        row = db.execute(select(LLMCall)).scalar_one()
+    # Read from a FRESH session: the FAILED audit row survives even though the
+    # request session was never committed. This is the invariant E-2 restores.
+    with db_factory() as fresh:
+        row = fresh.execute(select(LLMCall)).scalar_one()
         assert row.status == LLMCallStatus.FAILED
         assert "upstream down" in row.error_message
         # Duration was still recorded so debugging "slow failures" is possible.

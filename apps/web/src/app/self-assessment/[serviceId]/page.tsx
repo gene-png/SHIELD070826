@@ -10,6 +10,7 @@ import { ZtSelfAssessment } from "@/components/self-assessment/ZtSelfAssessment"
 import { PublicFooter } from "@/components/site/PublicFooter";
 import { PublicHeader } from "@/components/site/PublicHeader";
 import { authOptions } from "@/lib/auth/options";
+import { SELF_ASSESSMENT_SERVICE_TYPES } from "@/lib/intake/types";
 
 export const metadata: Metadata = { title: "Self-assessment" };
 
@@ -45,6 +46,15 @@ export default async function SelfAssessmentPage({
       `/self-assessment/${params.serviceId}?type=${type}`,
     );
     redirect(`/sign-in?callbackUrl=${cb}`);
+  }
+
+  // Only CSF/ZT self-assessments live here. Everything else (tech_debt,
+  // attack_coverage, consultation, or a missing type) belongs on the client
+  // detail page — send it there instead of a dead-end card.
+  if (
+    !(SELF_ASSESSMENT_SERVICE_TYPES as ReadonlyArray<string>).includes(type)
+  ) {
+    redirect(`/assessments/${params.serviceId}`);
   }
 
   const copy = COPY[type];

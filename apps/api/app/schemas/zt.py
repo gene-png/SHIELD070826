@@ -166,6 +166,10 @@ class ZtRunAiResponse(BaseModel):
     pillar_narratives: dict[str, str] = {}
     executive_summary: str | None = None
     roadmap_summary: str | None = None
+    # FIX E-5: badge simulated output. "fixture" = deterministic canned results;
+    # "live" = a real provider call. The web UI renders a "Simulated" badge when
+    # this is "fixture" and nothing when the field is absent.
+    mode: str = "fixture"
 
 
 class ZtInterviewQuestion(BaseModel):

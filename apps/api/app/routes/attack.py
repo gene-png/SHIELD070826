@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
-from app.ai.llm import LLMClient
+from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.attack.analytics import compute as compute_heatmap
 from app.attack.catalog import (
     TACTICS,
@@ -403,7 +403,13 @@ def patch_coverage(
 
 
 def _llm_dep() -> LLMClient:
-    return LLMClient.from_settings()
+    # FIX A-5: surface a misconfigured live LLM as a typed error, not a 500.
+    try:
+        return LLMClient.from_settings()
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 # FIX G-2: RELEASED counts as approved-or-better. A CapabilityList moves
@@ -576,22 +582,39 @@ def run_ai(
     # batches parse successfully: a bad/missing batch aborts the whole run
     # (FAIL LOUDLY) so the assessment is never left half-applied. Every input
     # code is covered by exactly one batch (see _chunk_by_tactic).
+    # FIX E-1a: tools + technique batches are materialized primitives and there
+    # are no pending writes, so return the pooled connection to the pool across
+    # the batched provider calls; the apply queries below re-acquire it. Capture
+    # the ids BEFORE rollback (which expires the ORM objects) so reading them as
+    # args doesn't reload + re-check-out a connection.
+    run_uid, run_sid, run_cid = user.id, svc.id, client.id
+    batches = _chunk_by_tactic(sorted(rows))
+    db.rollback()
     suggestions: list[Any] = []
     try:
-        for batch in _chunk_by_tactic(sorted(rows)):
+        for batch in batches:
             result = run_job(
                 db,
                 llm,
                 "mitre_map",
                 inputs={"capability_list": tools, "technique_codes": batch},
-                requested_by=user.id,
-                service_id=svc.id,
+                requested_by=run_uid,
+                service_id=run_sid,
+                client_id=run_cid,
                 client_org_name=client_org,
             )
             data = result.data if isinstance(result.data, dict) else None
             if data is None or "techniques" not in data:
                 raise ValueError("mitre_map batch returned no 'techniques' array")
             suggestions.extend(data.get("techniques") or [])
+    except LLMTimeoutError as exc:
+        # FIX E-1b: a provider timeout is distinct from a bad batch — surface a
+        # typed 504 (nothing applied), not the generic 502.
+        _log.warning("attack_run_ai_timeout", service_id=str(svc.id), error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="the AI call timed out; nothing was changed",
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - boundary: fail loud, apply nothing
         _log.warning(
             "attack_run_ai_failed",
@@ -667,6 +690,7 @@ def run_ai(
         # returned response always had every batch succeed.
         failed_batches=0,
         warnings=warnings,
+        mode=llm.mode,
     )
 
 

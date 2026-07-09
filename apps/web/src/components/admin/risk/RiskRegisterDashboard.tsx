@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
 
 import {
   Card,
@@ -35,6 +34,7 @@ import {
   type RiskTier,
 } from "@/lib/risk/matrix";
 import type { RiskEntry, RiskGate, RiskRegister } from "@/lib/risk/types";
+import { ClientSwitcher } from "@/components/site/ClientSwitcher";
 
 function TierChip({ tier }: { tier: string | null }): JSX.Element {
   const t = (tier ?? "negligible") as RiskTier;
@@ -217,15 +217,8 @@ export function RiskRegisterDashboard(): JSX.Element {
     return (
       <EmptyState
         title="Pick a client first"
-        description="The Risk Register is generated per client. Choose a client from the switcher, then return here."
-        action={
-          <Link
-            href="/admin/management"
-            className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600"
-          >
-            Go to Management
-          </Link>
-        }
+        description="The Risk Register is generated per client. Choose one to continue:"
+        action={<ClientSwitcher />}
       />
     );
   }

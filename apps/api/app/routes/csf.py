@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
-from app.ai.llm import LLMClient
+from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
 from app.csf import playbook_export as csf_playbook_export
 from app.csf.catalog import (
@@ -1019,7 +1019,13 @@ def _enterprise_subcategories(
 
 
 def _llm_dep() -> LLMClient:
-    return LLMClient.from_settings()
+    # FIX A-5: surface a misconfigured live LLM as a typed error, not a 500.
+    try:
+        return LLMClient.from_settings()
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 _DIM_FIELDS = ("governance", "policy", "implementation", "monitoring", "improvement")
@@ -1120,18 +1126,37 @@ def run_ai(
     for r in rows.values():
         chunks.setdefault(r.tier, []).append(r)
 
+    # FIX E-1a: materialize every chunk's grounded payload BEFORE releasing the
+    # pooled connection, so no ORM read happens across a provider call. There are
+    # no pending writes yet, so db.rollback() cleanly returns the connection; the
+    # apply queries below re-acquire it.
+    chunk_inputs = {
+        tier: {"tier": tier, "items": [_ground(r) for r in chunks[tier]]} for tier in sorted(chunks)
+    }
+    # Capture the ids BEFORE rollback: db.rollback() expires these ORM objects,
+    # so reading .id afterwards would reload them and re-check-out a connection
+    # for the whole provider call — defeating the release.
+    run_uid, run_sid, run_cid = user.id, svc.id, client.id
+    db.rollback()
+
     merged_scores: list = []
-    for tier in sorted(chunks):
+    for tier in sorted(chunk_inputs):
         try:
             result = run_job(
                 db,
                 llm,
                 "csf_score",
-                inputs={"tier": tier, "items": [_ground(r) for r in chunks[tier]]},
-                requested_by=user.id,
-                service_id=svc.id,
+                inputs=chunk_inputs[tier],
+                requested_by=run_uid,
+                service_id=run_sid,
+                client_id=run_cid,
                 client_org_name=client_org,
             )
+        except LLMTimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="the AI call timed out; nothing was changed",
+            ) from exc
         except ValueError as exc:
             # CRITICAL: one bad chunk aborts the whole run and applies NOTHING.
             # No score row has been mutated yet (application happens only after
@@ -1197,7 +1222,7 @@ def run_ai(
         _score_response(r)
         for r in sorted(rows.values(), key=lambda r: (r.tier, r.subcategory_code))
     ]
-    return CsfRunAiResponse(changed=changes, rows=out_rows)
+    return CsfRunAiResponse(changed=changes, rows=out_rows, mode=llm.mode)
 
 
 @router.post(

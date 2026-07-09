@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     shield_llm_mode: Literal["fixture", "live"] = "fixture"
     anthropic_api_key: str = ""
 
+    # G-3 escape hatch. Fixture (simulated) AI output must never be delivered
+    # to a client as real analysis. In production, fixture mode is refused at
+    # startup unless SHIELD_DEMO is exactly "1" (an explicit, deliberate demo).
+    shield_demo: str = ""
+
     # Bootstrap admin service account. When email+password are set, the app
     # provisions exactly one admin with this email at startup (idempotent);
     # self-registration never creates admins. Leave empty to skip seeding.
@@ -90,6 +95,20 @@ class Settings(BaseSettings):
         "dev-only-replace-via-secrets-manager"  # noqa: S105 - dev placeholder, refused in prod via assert_safe_for_runtime
     )
 
+    # Rate limiting (H-2). Redis-backed fixed-window limiter (app.middleware
+    # .ratelimit). Tunable from the environment so production can adjust
+    # thresholds without a deploy. The limiter FAILS OPEN: if Redis is
+    # unreachable it logs a warning and lets the request through rather than
+    # taking the API down. Disabled by default so the test suite and local dev
+    # never trip it - production opts in with SHIELD_RATE_LIMIT_ENABLED=true.
+    # Any per-window limit <= 0 also disables that individual bucket.
+    shield_rate_limit_enabled: bool = False
+    shield_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    # Per-IP limit for the unauthenticated auth endpoints (login/register/refresh).
+    shield_rate_limit_auth_per_min: int = 10
+    # Per-user limit for the synchronous AI endpoints (run-ai / generate / extract).
+    shield_rate_limit_ai_per_min: int = 6
+
     # Mail (MailHog in dev)
     smtp_host: str = "mailhog"
     smtp_port: int = 1025
@@ -107,6 +126,17 @@ class Settings(BaseSettings):
             )
         if self.is_production() and self.jwt_signing_secret.startswith("dev-only"):
             raise RuntimeError("JWT_SIGNING_SECRET is still the default placeholder in production.")
+        # G-3: running a production engagement in fixture mode would deliver
+        # simulated AI output to a client as real analysis. Refuse to boot
+        # unless the operator has explicitly opted into a demo (SHIELD_DEMO=1).
+        if self.is_production() and self.shield_llm_mode == "fixture" and self.shield_demo != "1":
+            raise RuntimeError(
+                "ENVIRONMENT=production with SHIELD_LLM_MODE=fixture would deliver "
+                "simulated (fixture) AI output to a client as if it were real "
+                "analysis. Refusing to start. For a real engagement set "
+                "SHIELD_LLM_MODE=live; to run an intentional demo on fixture data "
+                "set SHIELD_DEMO=1."
+            )
 
 
 @lru_cache(maxsize=1)

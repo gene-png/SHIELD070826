@@ -15,12 +15,40 @@ import type {
  * the wire to the browser.
  */
 
+/**
+ * Turn a proxy error payload into a human-readable message. Prefers the
+ * backend's typed detail (FastAPI `detail`, or a `{ error: { message } }`
+ * envelope) and falls back to a friendly generic per status. Mirrors
+ * describeMessagesError in ../messages/client.ts.
+ */
+function proxyErrorMessage(status: number, payload: unknown): string {
+  const typed = payload as
+    { error?: { message?: string }; detail?: string } | null | undefined;
+  const detail = typed?.error?.message ?? typed?.detail;
+  if (typeof detail === "string" && detail.trim().length > 0) {
+    return detail;
+  }
+  if (status === 401 || status === 403) {
+    return "You're not signed in, or your session has expired. Sign in and try again.";
+  }
+  if (status === 404) {
+    return "We couldn't find that — it may have been removed.";
+  }
+  if (status === 504) {
+    return "The request timed out. Please try again.";
+  }
+  if (status >= 500) {
+    return "Something went wrong on our end. Please try again in a moment.";
+  }
+  return `Request failed (${status}).`;
+}
+
 class ProxyError extends Error {
   constructor(
     public readonly status: number,
     public readonly payload: unknown,
   ) {
-    super(`Intake proxy ${status}`);
+    super(proxyErrorMessage(status, payload));
   }
 }
 
@@ -90,6 +118,19 @@ async function safeJson(res: Response): Promise<unknown> {
   } catch {
     return await res.text();
   }
+}
+
+/**
+ * True when an error is the backend's "finish your intake first" rejection
+ * (422 raised because the organization profile is still pending). Lets the UI
+ * offer a direct link to /intake instead of a bare error string.
+ */
+export function isIncompleteIntakeError(err: unknown): boolean {
+  return (
+    err instanceof ProxyError &&
+    err.status === 422 &&
+    /intake/i.test(err.message)
+  );
 }
 
 export { ProxyError };

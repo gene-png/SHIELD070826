@@ -23,6 +23,8 @@ import {
   runZtAi,
   ZtProxyError,
 } from "@/lib/zt/client";
+import { isAbortError } from "@/lib/http";
+import { SimulatedBadge } from "@/components/admin/SimulatedBadge";
 import type {
   GapAnalysis,
   ZtAnswer,
@@ -58,8 +60,7 @@ function normalizeTarget(value: number | null | undefined): number {
 function describeError(err: unknown): string {
   if (err instanceof ZtProxyError) {
     const payload = err.payload as
-      | { error?: { message?: string }; detail?: string }
-      | undefined;
+      { error?: { message?: string }; detail?: string } | undefined;
     return (
       payload?.error?.message ??
       payload?.detail ??
@@ -94,6 +95,7 @@ export function ZtWorkspace({
     null,
   );
   const [targetStage, setTargetStage] = React.useState(3);
+  const runAbortRef = React.useRef<AbortController | null>(null);
 
   const answersByCode = React.useMemo(() => {
     const out: Record<string, ZtAnswer> = {};
@@ -220,20 +222,32 @@ export function ZtWorkspace({
   }
 
   async function onRunAi(): Promise<void> {
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     setBusy("run");
     setRunResult(null);
+    setLoadError(null);
     try {
-      const result = await runZtAi(serviceId);
+      const result = await runZtAi(serviceId, controller.signal);
       setRunResult(result);
       // Re-pull so the questionnaire + score reflect the AI's suggestions.
       const a = await fetchLatestAssessment(serviceId);
       setAssessment(a);
       await refreshScoreAndGap(targetStage);
     } catch (err) {
-      setLoadError(describeError(err));
+      if (isAbortError(err)) {
+        setLoadError("AI run canceled. No changes were applied.");
+      } else {
+        setLoadError(describeError(err));
+      }
     } finally {
+      runAbortRef.current = null;
       setBusy(null);
     }
+  }
+
+  function onCancelRun(): void {
+    runAbortRef.current?.abort();
   }
 
   const readOnly =
@@ -360,7 +374,7 @@ export function ZtWorkspace({
                 this framework&apos;s scale) plus per-pillar narratives. Locked
                 rows are left untouched.
               </p>
-              <div>
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => void onRunAi()}
@@ -369,6 +383,15 @@ export function ZtWorkspace({
                 >
                   {busy === "run" ? "Running…" : "Run AI"}
                 </button>
+                {busy === "run" ? (
+                  <button
+                    type="button"
+                    onClick={onCancelRun}
+                    className="rounded-md border border-border-default px-4 py-2 text-sm font-semibold text-ink-primary hover:bg-surface-muted"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
               </div>
               {runResult ? (
                 <p className="text-sm text-ink-secondary" aria-live="polite">
@@ -387,7 +410,7 @@ export function ZtWorkspace({
                     .size === 1
                     ? "y"
                     : "ies"}
-                  .
+                  .{runResult.mode === "fixture" ? <SimulatedBadge /> : null}
                 </p>
               ) : null}
             </CardBody>

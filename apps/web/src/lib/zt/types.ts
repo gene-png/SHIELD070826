@@ -2,10 +2,7 @@
 
 export type ZtFramework = "cisa_ztmm_2_0" | "dod_ztra";
 export type ZtAssessmentStatus =
-  | "draft"
-  | "submitted"
-  | "approved"
-  | "released";
+  "draft" | "submitted" | "approved" | "released";
 
 export interface CatalogCapability {
   code: string;
@@ -81,6 +78,9 @@ export interface ZtRunAiResponse {
   pillar_narratives: Record<string, string>;
   executive_summary: string | null;
   roadmap_summary: string | null;
+  /** AI execution mode; "fixture" means the output is a deterministic
+   * simulation, not a real model call. May be absent on older responses. */
+  mode?: "fixture" | "live";
 }
 
 export interface PillarScore {

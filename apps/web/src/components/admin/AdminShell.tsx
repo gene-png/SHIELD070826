@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { ClientSwitcher } from "@/components/site/ClientSwitcher";
 import { SignOutButton } from "@/components/site/SignOutButton";
 import { SkipToContent } from "@/components/site/SkipToContent";
 
@@ -96,6 +97,7 @@ export function AdminShell({
               ))}
             </nav>
             <div className="ml-auto flex items-center gap-3">
+              <ClientSwitcher />
               <Link
                 href="/admin/queue"
                 className="rounded-md px-3 py-2 text-sm font-medium text-ink-secondary hover:text-ink-primary"

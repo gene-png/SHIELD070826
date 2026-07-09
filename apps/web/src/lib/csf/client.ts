@@ -20,13 +20,14 @@ import type {
 interface JsonRequestInit {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
+  signal?: AbortSignal;
 }
 
 async function jsonRequest<T>(
   url: string,
   init: JsonRequestInit = {},
 ): Promise<T> {
-  const { body, method = "GET" } = init;
+  const { body, method = "GET", signal } = init;
   const res = await fetch(url, {
     method,
     cache: "no-store",
@@ -35,6 +36,7 @@ async function jsonRequest<T>(
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     let payload: unknown;
@@ -276,10 +278,13 @@ export async function fetchEnterpriseProfile(
   }
 }
 
-export async function runCsfAi(serviceId: string): Promise<CsfRunAiResponse> {
+export async function runCsfAi(
+  serviceId: string,
+  signal?: AbortSignal,
+): Promise<CsfRunAiResponse> {
   return jsonRequest<CsfRunAiResponse>(
     `/api/proxy/csf/services/${serviceId}/run-ai`,
-    { method: "POST" },
+    { method: "POST", signal },
   );
 }
 

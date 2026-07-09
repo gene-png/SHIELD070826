@@ -93,10 +93,17 @@ def run_job(
     inputs: dict[str, Any],
     requested_by: uuid.UUID,
     service_id: uuid.UUID | None = None,
+    client_id: uuid.UUID | None = None,
     client_org_name: str | None = None,
     name_hints: Iterable[str] = (),
 ) -> JobResult:
-    """Run an AI job: redact + log (via LLMClient) + call + parse."""
+    """Run an AI job: redact + log (via LLMClient) + call + parse.
+
+    `db` is retained only so `LLMClient.invoke` can bind its autonomous
+    llm_calls session to the caller's engine (FIX E-2); run_job never queries or
+    writes through it, so the route may return the pooled connection to the pool
+    across the provider call (FIX E-1a). `client_id` attributes the spend to a
+    tenant (FIX H-5); when omitted, invoke derives it from `service_id`."""
     job = get_job(job_name)
     response, call_row = llm.invoke(
         db,
@@ -105,6 +112,7 @@ def run_job(
         payload=inputs,
         requested_by=requested_by,
         service_id=service_id,
+        client_id=client_id,
         prompt_version=job.prompt_version,
         client_org_name=client_org_name,
         name_hints=tuple(name_hints),

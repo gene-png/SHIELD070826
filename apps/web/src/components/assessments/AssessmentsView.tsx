@@ -11,26 +11,25 @@ import {
   CardTitle,
   EmptyState,
   StatusPill,
-  cn,
 } from "@shield/design-system";
 
-import { createAssessment, fetchAssessments } from "@/lib/intake/client";
+import {
+  createAssessment,
+  fetchAssessments,
+  isIncompleteIntakeError,
+} from "@/lib/intake/client";
 import {
   CSF_PROFILES,
   CSF_TARGET_TIERS,
   ASSESSMENT_SERVICE_TYPES,
+  SELF_ASSESSMENT_SERVICE_TYPES,
   SERVICE_LABELS,
   ZT_TARGET_STAGES,
+  clientAssessmentHref,
   type CsfProfile,
   type AssessmentResponse,
   type ServiceType,
 } from "@/lib/intake/types";
-
-const SELF_ASSESSMENT_TYPES: ReadonlyArray<ServiceType> = [
-  "nist_csf",
-  "zero_trust_cisa",
-  "zero_trust_dod",
-];
 
 function statusTone(
   assessment: string | null,
@@ -75,6 +74,7 @@ export function AssessmentsView(): JSX.Element {
   const [ztStage, setZtStage] = React.useState<number | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [createError, setCreateError] = React.useState<string | null>(null);
+  const [createNeedsIntake, setCreateNeedsIntake] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -101,6 +101,7 @@ export function AssessmentsView(): JSX.Element {
   async function onCreate(): Promise<void> {
     setSubmitting(true);
     setCreateError(null);
+    setCreateNeedsIntake(false);
     try {
       const created = await createAssessment({
         service_type: svcType,
@@ -114,6 +115,7 @@ export function AssessmentsView(): JSX.Element {
         `/self-assessment/${created.service_id}?type=${created.service_type}`,
       );
     } catch (err) {
+      setCreateNeedsIntake(isIncompleteIntakeError(err));
       setCreateError(
         err instanceof Error ? err.message : "Couldn't start the assessment.",
       );
@@ -257,9 +259,17 @@ export function AssessmentsView(): JSX.Element {
             ) : null}
 
             {createError ? (
-              <p role="alert" className="text-sm text-status-danger-fg">
-                {createError}
-              </p>
+              <div role="alert" className="flex flex-col gap-2 text-sm">
+                <p className="text-status-danger-fg">{createError}</p>
+                {createNeedsIntake ? (
+                  <Link
+                    href="/intake"
+                    className="self-start rounded-md bg-brand-500 px-4 py-2 font-semibold text-ink-on-accent hover:bg-brand-600"
+                  >
+                    Finish intake →
+                  </Link>
+                ) : null}
+              </div>
             ) : null}
 
             <div className="flex items-center gap-3">
@@ -304,41 +314,41 @@ export function AssessmentsView(): JSX.Element {
       ) : (
         <ul className="flex flex-col gap-3">
           {assessments.map((e) => {
-            const isSelfAssessment = SELF_ASSESSMENT_TYPES.includes(
+            const isSelfAssessment = SELF_ASSESSMENT_SERVICE_TYPES.includes(
               e.service_type,
             );
-            const canContinue =
-              isSelfAssessment && e.assessment_status === "draft";
+            const isDraft = isSelfAssessment && e.assessment_status === "draft";
+            const cta = isDraft ? "Continue →" : "Open →";
             return (
               <li key={e.service_id}>
-                <Card>
-                  <CardBody className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-base font-semibold text-ink-primary">
-                        {e.title}
-                      </p>
-                      <p className="text-sm text-ink-secondary">
-                        {SERVICE_LABELS[e.service_type]}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <StatusPill
-                        tone={statusTone(e.assessment_status, e.status)}
-                        withDot
-                      >
-                        {statusLabel(e)}
-                      </StatusPill>
-                      {canContinue ? (
-                        <Link
-                          href={`/self-assessment/${e.service_id}?type=${e.service_type}`}
-                          className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600"
+                <Link
+                  href={clientAssessmentHref(e.service_type, e.service_id)}
+                  className="block rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                >
+                  <Card className="transition-colors hover:border-border-strong">
+                    <CardBody className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-base font-semibold text-ink-primary">
+                          {e.title}
+                        </p>
+                        <p className="text-sm text-ink-secondary">
+                          {SERVICE_LABELS[e.service_type]}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <StatusPill
+                          tone={statusTone(e.assessment_status, e.status)}
+                          withDot
                         >
-                          Continue →
-                        </Link>
-                      ) : null}
-                    </div>
-                  </CardBody>
-                </Card>
+                          {statusLabel(e)}
+                        </StatusPill>
+                        <span className="text-sm font-semibold text-brand-500">
+                          {cta}
+                        </span>
+                      </div>
+                    </CardBody>
+                  </Card>
+                </Link>
               </li>
             );
           })}

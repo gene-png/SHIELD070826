@@ -1,10 +1,7 @@
 /** Wire types mirroring apps/api/app/schemas/csf.py. */
 
 export type CsfAssessmentStatus =
-  | "draft"
-  | "submitted"
-  | "approved"
-  | "released";
+  "draft" | "submitted" | "approved" | "released";
 
 export interface CatalogSubcategory {
   code: string;
@@ -220,6 +217,9 @@ export interface CsfDimensionChange {
 export interface CsfRunAiResponse {
   changed: CsfDimensionChange[];
   rows: CsfDimensionScore[];
+  /** AI execution mode; "fixture" means the output is a deterministic
+   * simulation, not a real model call. May be absent on older responses. */
+  mode?: "fixture" | "live";
 }
 
 export interface ExportedArtifact {

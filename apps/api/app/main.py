@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.exceptions import register_exception_handlers
 from app.logging import configure_logging, get_logger
 from app.middleware.correlation import CorrelationIdMiddleware
+from app.middleware.ratelimit import RateLimitMiddleware
 from app.routes import (
     admin,
     artifacts,
@@ -81,6 +82,10 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
+    # Order matters: middleware added later runs first (outermost). Add the
+    # rate limiter first so CorrelationIdMiddleware wraps it and the request's
+    # correlation ID is already set when the limiter emits a 429 log line.
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     register_exception_handlers(app)
 

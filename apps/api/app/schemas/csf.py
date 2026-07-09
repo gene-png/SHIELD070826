@@ -303,6 +303,9 @@ class CsfRunAiResponse(BaseModel):
 
     changed: list[CsfDimensionChange]
     rows: list[CsfDimensionScoreResponse]
+    # FIX E-5: "fixture" = deterministic simulated results; "live" = a real
+    # provider call. The web UI badges simulated output on "fixture".
+    mode: str = "fixture"
 
 
 class ExportedArtifact(BaseModel):
