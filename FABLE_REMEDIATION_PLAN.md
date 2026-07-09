@@ -426,9 +426,69 @@ The negative control matters: a suite that has never failed is not evidence of a
 3. **`.gitignore` already carried a Playwright section** before this sprint (`test-results/`, `playwright-report/`, `playwright/.cache/`). Someone scaffolded the intent; the harness never landed. Nothing to add.
 4. **Live smoke remains SKIPPED** — no `ANTHROPIC_API_KEY` present. Per the recorded decision, it is scaffolded and arms automatically the moment a key is supplied. **No live Claude call has been made, and none is claimed.**
 
-### Sprint 1 — Trustworthy Core
+### Sprint 1 — Trustworthy Core ✅ PASS
 
-> _Not started._
+**Executed 2026-07-09. Lead independently verified every subagent claim before recording it here.**
+
+**Subagents used (Opus, narrow scope, disjoint file ownership).**
+
+| Subagent                         | Fixes                               | Owned files                                                                          |
+| -------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------ |
+| AI core (backend)                | A-1, A-3 plumbing, A-2/A-4 prompts  | `app/ai/*`, `config.py`, compose + `.env.example` defaults                           |
+| ZT (backend)                     | B-1                                 | `routes/zt.py`                                                                       |
+| Risk (backend)                   | A-4 route half                      | `routes/risk.py`                                                                     |
+| ATT&CK (backend)                 | A-3 chunking, G-2                   | `routes/attack.py`, `schemas/attack.py`                                              |
+| CSF (backend)                    | A-2 payload, A-3 chunking, B-2, B-3 | `routes/csf.py`, `models/csf_profile.py`, `csf/playbook_export.py`, migration `0029` |
+| Extraction (security + frontend) | C-1 (re-scoped), C-2                | `tech_debt/*`, `routes/artifacts.py`, 3 web accept lists                             |
+
+**Tests run (quiescent tree — the only run whose result is meaningful).**
+
+| Command                                                  | Result                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------ |
+| `python -m pytest` (`apps/api`)                          | **497 passed, 8 skipped, 0 failed, 0 errors**, EXIT=0              |
+| Delta vs baseline                                        | +17 new regression tests; **zero existing tests broken**           |
+| `ruff check app tests`                                   | All checks passed                                                  |
+| `black --check app tests`                                | Clean, 170 files                                                   |
+| `alembic upgrade head` → `downgrade -1` → `upgrade head` | All succeed; `scored_at` added nullable, removed cleanly, re-added |
+| Migration in real Postgres container                     | `alembic_version = 0029`, `scored_at` present                      |
+| Prettier on every file Sprint 0+1 touched                | Clean                                                              |
+
+**Playwright validation.** Stack rebuilt with all Sprint 1 changes; API healthy; `docker compose --profile test run --rm playwright` → **3 passed (8.2s), EXIT=0**. This proves migration `0029` applies at container boot and the new A-1 boot guard does not block fixture-mode startup.
+
+**The 17 new regression tests, each pinning a specific fix:**
+
+- B-1 `test_finalized_gap_count_matches_dashboard_not_default_target` — opens the real XLSX Gap Plan sheet
+- B-2 `test_finalize_honors_client_target_tier`
+- B-3 `test_playbook_export_blocked_until_scored_and_approved`
+- A-2 `test_csf_run_ai_payload_is_grounded`
+- A-3 `test_csf_run_ai_chunks_by_tier_exactly_once`, `test_csf_run_ai_one_bad_chunk_applies_nothing`, `test_run_ai_chunks_cover_every_code_exactly_once_and_merges`, `test_run_ai_bad_batch_aborts_and_applies_nothing`
+- A-4 `test_display_cased_enums_coerce_and_derive_tier`, `test_hyphenated_case_also_normalizes`, `test_unknown_token_returns_none_and_warns`, `test_canonical_lowercase_tokens_still_work`
+- G-2 `test_run_ai_draft_only_list_yields_empty_tools_and_warns`, `test_run_ai_approved_v2_excludes_v1_ghost_items`
+- C-1 `test_extract_header_only_csv_422_no_llm_call_no_list`, `test_extract_caps_rows_at_500_and_reports_truncation`
+- C-2 `test_upload_rejects_legacy_xls_with_actionable_message`, `test_extract_corrupt_xlsx_422_not_500`
+
+**Every regression test was proven to fail against the un-fixed code.** Each subagent reverted its own fix, watched the test go red, and restored it. Sample evidence: B-1 → `assert 0 == 37` (finalized deliverable claimed zero gaps while the dashboard showed 37); A-4 → `assert None == 'very_low'` (`"Very Low"` coerced to `None`, nulling the tier); C-2 → `.xls` upload returned `201` with `mime_type: application/vnd.ms-excel` instead of `415`. A test that passes against the broken code is a false guarantee, and this repo already contained one (`test_llm_client.py` commits by hand to "prove" durability production does not have).
+
+**Corrections the subagents made to _my_ instructions — recorded because they matter:**
+
+1. I told the AI-core agent the likelihood scale was `very_low, low, moderate, high, very_high`. The real enum is `MEDIUM = "medium"`. It read `risk/engine.py`, used the true value, and flagged the discrepancy. Obeying me would have shipped A-4's fix with `moderate` in the prompt and `medium` in the enum — the identical silent-null bug, freshly reintroduced.
+2. The ATT&CK agent could not surface G-2's warning without adding a field to `app/schemas/attack.py` (FastAPI's `response_model` strips unknown fields). It made the minimal addition and flagged the scope expansion rather than hiding it.
+3. The extraction agent independently confirmed the remediation document is wrong about C-1: no `app/ai/fixtures.py`, no fabrication logic anywhere.
+
+**Lead-applied corrections:**
+
+- The extraction agent had no host `pnpm` and left `TechDebtWorkspace.tsx` and `Dropzone.tsx` unformatted. This would have broken the Web CI job. I formatted both and re-verified.
+- I reviewed the ZT agent's scope expansion (dashboard `target_stage` default `3` → `None`). Accepted: precedence is now explicit query param → client's `ServiceRequest.zt_target_stage` → `DEFAULT_TARGET_STAGE`, and both dashboard and finalize call one helper (`_resolve_gap_targets`), so they cannot drift again. B-1 existed _because_ two call sites computed the same value independently.
+
+**Pass/fail: PASS.**
+
+**Remaining issues / follow-ups.**
+
+1. **`main` is already prettier-dirty.** CI's `format:check` (prettier 3.9.4, pinned in `pnpm-lock.yaml`) flags **17 pre-existing files** at HEAD, in files no agent touched. The Web CI job is therefore already failing on `main`, independent of this work. Folded into H-4 (Sprint 3, docs/CI truth pass). I did not silently widen scope to fix it.
+2. **`effective_max_tokens = max_tokens or 128000`** in `AnthropicProvider.complete`. Both Haiku jobs pin `32000`, so this is safe today. But a future job pinned to Haiku _without_ an explicit cap would request 128000 and take a 400 from Haiku's 64K ceiling — the X-1 coupling, one careless edit from returning. Consider a provider-level assertion in Sprint 2.
+3. **The CSF subagent died mid-run** on an API/SSL error, after implementing all four of its fixes but before validating them. I verified each layer myself (`scored_at` nullable; 409 on unscored; 409 on unapproved; `documents_stale` cleared only after the gate; `"Unscored"` rendered; `target_tier` threaded into `analyze_gaps`; chunk-by-tier with apply-after-all-parse; `_ground()` sending answers, notes and evidence flags) rather than resuming it blindly.
+4. **Live AI still unproven against the real API.** No `ANTHROPIC_API_KEY`. Contract tests (A-6) land in Sprint 2 and are the actual guard against the A-2/A-4 class of defect; the gated live smoke test remains armed and skipping.
+5. **e2e specs for the new flows** (playbook export gate, extraction errors) are Sprint 2 per the plan. Sprint 1's proof is unit-level plus the smoke suite confirming the stack still boots and serves.
 
 ### Sprint 2 — Solid Operations
 

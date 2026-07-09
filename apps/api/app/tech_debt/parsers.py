@@ -22,17 +22,59 @@ class UnsupportedInventoryFormat(ValueError):
     """Raised when an artifact's MIME isn't a recognized inventory format."""
 
 
-# MIME types that the ingest endpoint accepts.
+class EmptyInventoryError(ValueError):
+    """Raised when an inventory file yields zero *data* rows to extract.
+
+    Header-only sheets, blank files, or anything that parses down to no
+    usable rows land here. Calling the LLM with nothing to extract is both
+    a waste and the road to fabricated output, so the route turns this into
+    a typed 422 *before* any provider call.
+    """
+
+
+class CorruptInventoryError(ValueError):
+    """Raised when a file advertised as .xlsx can't be opened as one.
+
+    openpyxl raises low-level ``zipfile.BadZipFile`` /
+    ``openpyxl ... InvalidFileException`` for OLE2 legacy .xls bytes or a
+    truncated/corrupt .xlsx. We convert those at the parse boundary so the
+    route can return a typed 422 instead of a raw 500.
+    """
+
+
+# MIME types that the ingest endpoint accepts. Legacy .xls
+# (``application/vnd.ms-excel``) is intentionally absent: openpyxl cannot
+# read OLE2 .xls, so those are rejected at upload with an actionable message
+# (re-save as .xlsx) rather than crashing extraction.
 SUPPORTED_MIME = {
     "text/csv": "csv",
     "text/plain": "csv",  # treat .txt as CSV; most inventory exports save this way
-    "application/vnd.ms-excel": "xlsx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
 }
 
 # Max rows we ship to the LLM. Above this and we'd either bust the context
 # window or pay a fortune in tokens. v1 inventories are typically 50-300 rows.
 MAX_ROWS = 500
+
+# Internal marker key appended by parse_inventory when the input exceeds
+# MAX_ROWS. It carries the "truncated" signal but is NOT a data row: it must
+# never be shipped to the LLM or persisted as a capability.
+SENTINEL_KEY = "__truncated__"
+
+
+def is_sentinel_row(row: Any) -> bool:
+    """True for the internal truncation marker (see SENTINEL_KEY)."""
+    return isinstance(row, dict) and SENTINEL_KEY in row
+
+
+def data_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The real data rows, with any truncation sentinel skipped."""
+    return [row for row in rows if not is_sentinel_row(row)]
+
+
+def was_truncated(rows: Iterable[dict[str, Any]]) -> bool:
+    """Whether the parsed rows carry a truncation sentinel."""
+    return any(is_sentinel_row(row) for row in rows)
 
 
 def kind_for_mime(mime_type: str) -> str:
@@ -62,7 +104,7 @@ def parse_inventory(data: bytes, mime_type: str) -> list[dict[str, Any]]:
     truncated = len(out) > MAX_ROWS
     if truncated:
         out = out[:MAX_ROWS]
-        out.append({"__truncated__": True, "__hint__": f"Input had > {MAX_ROWS} rows."})
+        out.append({SENTINEL_KEY: True, "__hint__": f"Input had > {MAX_ROWS} rows."})
     return out
 
 
@@ -77,9 +119,21 @@ def _parse_csv(data: bytes) -> Iterable[dict[str, Any]]:
 def _parse_xlsx(data: bytes) -> Iterable[dict[str, Any]]:
     # openpyxl is lazy-imported so test runs that don't touch XLSX don't
     # pay the import cost.
-    from openpyxl import load_workbook
+    from zipfile import BadZipFile
 
-    wb = load_workbook(filename=io.BytesIO(data), read_only=True, data_only=True)
+    from openpyxl import load_workbook
+    from openpyxl.utils.exceptions import InvalidFileException
+
+    try:
+        wb = load_workbook(filename=io.BytesIO(data), read_only=True, data_only=True)
+    except (BadZipFile, InvalidFileException) as exc:
+        # Legacy OLE2 .xls bytes or a truncated/corrupt .xlsx. Convert the
+        # raw library error into a typed one so the route returns a 422, not
+        # an unhandled 500.
+        raise CorruptInventoryError(
+            "This file could not be read as a valid .xlsx workbook. "
+            "Re-save it as .xlsx and upload again."
+        ) from exc
     ws = wb.active
     if ws is None:
         return

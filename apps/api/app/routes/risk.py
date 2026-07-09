@@ -175,15 +175,51 @@ def _gather_findings(db: Session, client_id: uuid.UUID) -> tuple[list[dict], set
 
 
 def _enum_or_none(enum_cls, value):
+    """Coerce ``value`` to a member of ``enum_cls``, normalizing display casing.
+
+    The AI is asked for lowercase snake_case tokens, but drift (e.g. a prompt or
+    model that emits display labels like "Very High" or "Very-High") must not
+    silently null the field and, through it, the code-derived tier. So we lower,
+    strip, and turn internal spaces/hyphens into underscores before coercing.
+
+    It is a purely mechanical normalization: non-string values and genuinely
+    unknown tokens still return None. It does NOT fuzzy-match or alias unknown
+    vocabulary (e.g. "moderate" is not remapped to the "medium" likelihood, and
+    "extremely_high" stays None) — it must never invent a value.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
     try:
-        return enum_cls(value)
+        return enum_cls(normalized)
     except (ValueError, KeyError):
         return None
 
 
+def _provided(value) -> bool:
+    """Whether the AI actually supplied an enum value (vs. omitting it)."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+class RiskRegisterGenerateResponse(RiskRegisterResponse):
+    """generate() response: the register plus visibility into enum drift.
+
+    Today a likelihood/impact token the engine doesn't recognize is silently
+    coerced to None, blanking the tier with no signal to anyone. These fields
+    make a future drift VISIBLE at the point of generation.
+    """
+
+    coercion_failures: int = 0
+    warnings: list[str] = []
+
+
 @router.post(
     "/clients/{cid}/register/generate",
-    response_model=RiskRegisterResponse,
+    response_model=RiskRegisterGenerateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Generate a new Risk Register version (admin)",
 )
@@ -192,7 +228,7 @@ def generate(
     admin: Annotated[User, _admin_required],
     db: Annotated[Session, Depends(get_db)],
     llm: Annotated[LLMClient, Depends(_llm_dep)],
-) -> RiskRegisterResponse:
+) -> RiskRegisterGenerateResponse:
     client = _require_client(db, cid)
     g = _gate(db, cid)
     if not g.unlocked:
@@ -226,6 +262,7 @@ def generate(
     if prior is not None:
         prior.superseded_by = register.id
 
+    coercion_failures = 0
     for raw in data.get("entries", []):
         if not isinstance(raw, dict) or not raw.get("title"):
             continue
@@ -237,6 +274,18 @@ def generate(
         controls = [c for c in (raw.get("linked_controls") or []) if c in valid_controls]
         axis = _enum_or_none(RiskAxis, raw.get("axis"))
         action = _enum_or_none(RecommendedAction, raw.get("recommended_action"))
+        # An AI-supplied enum token the engine can't place -> None -> blank tier.
+        # Count it so drift surfaces in the response instead of failing silently.
+        if any(
+            coerced is None and _provided(raw.get(key))
+            for coerced, key in (
+                (lk, "likelihood"),
+                (im, "impact"),
+                (axis, "axis"),
+                (action, "recommended_action"),
+            )
+        ):
+            coercion_failures += 1
         db.add(
             RiskEntry(
                 register_id=register.id,
@@ -266,10 +315,29 @@ def generate(
         target_type="risk_register",
         target_id=register.id,
         actor_user_id=admin.id,
-        details={"version": next_version, "findings": len(findings)},
+        details={
+            "version": next_version,
+            "findings": len(findings),
+            "coercion_failures": coercion_failures,
+        },
     )
     db.commit()
-    return _serialize(db, register)
+
+    warnings: list[str] = []
+    if coercion_failures:
+        noun = "entry" if coercion_failures == 1 else "entries"
+        warnings.append(
+            f"{coercion_failures} AI-drafted risk {noun} had a "
+            "likelihood/impact/axis/action value the risk engine did not "
+            "recognize; it was dropped and the tier may be blank. Check the AI "
+            "prompt and app/risk/engine.py enums for vocabulary drift."
+        )
+    base = _serialize(db, register)
+    return RiskRegisterGenerateResponse(
+        **base.model_dump(),
+        coercion_failures=coercion_failures,
+        warnings=warnings,
+    )
 
 
 def _write_artifact(

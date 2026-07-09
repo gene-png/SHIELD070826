@@ -80,7 +80,7 @@ def render_xlsx(
                 levels.get("high", ""),
                 levels.get("moderate", ""),
                 levels.get("low", ""),
-                f"L{r.enterprise_level}",
+                _ent_label(r),
                 f"#{r.rollup_rule}",
                 f"L{r.target_level}" if r.target_level else "",
                 "Yes" if r.gap else "",
@@ -120,7 +120,7 @@ def render_xlsx(
                     row.monitoring,
                     row.improvement,
                     row.total,
-                    f"L{row.level}",
+                    _tier_label(row),
                     "Yes" if row.evidence_capped else "",
                     "Yes" if row.in_scope else "No",
                     f"L{row.target_level}" if row.target_level else "",
@@ -187,6 +187,30 @@ METHODOLOGY = [
     "evidence cap, the roll-up, gaps, and priorities are computed "
     "deterministically in code.",
 ]
+
+
+# FIX B-3 layer 3 (belt and braces). Rows carry a `scored` flag (default True for
+# any caller that doesn't set one). A row that was never scored renders
+# "Unscored" for its maturity level instead of an all-zero "L1", and is left
+# unshaded. The export gate already blocks unscored rows, so these paths are a
+# defensive backstop, never the normal case.
+_UNSCORED = "Unscored"
+
+
+def _is_scored(r: Any) -> bool:
+    return getattr(r, "scored", True) is not False
+
+
+def _ent_label(r: Any) -> str:
+    return f"L{r.enterprise_level}" if _is_scored(r) else _UNSCORED
+
+
+def _tier_label(r: Any) -> str:
+    return f"L{r.level}" if _is_scored(r) else _UNSCORED
+
+
+def _ent_shades(rows: Sequence[Any]) -> list[int | None]:
+    return [(r.enterprise_level if _is_scored(r) else None) for r in rows]
 
 
 def _fn_code(raw: Any) -> str:
@@ -405,13 +429,13 @@ def _gap_table(story: list[Any], styles: dict[str, Any], gaps: Sequence[Any]) ->
         [
             g.subcategory_code,
             Paragraph(escape(g.name), styles["cell"]),
-            f"L{g.enterprise_level}",
+            _ent_label(g),
             f"L{g.target_level}" if g.target_level else "—",
             g.priority or "",
         ]
         for g in gaps
     ]
-    levels = [g.enterprise_level for g in gaps]
+    levels = _ent_shades(gaps)
     story.append(
         _pdf_table(
             ["Subcategory", "Outcome", "Current", "Target", "Priority"],
@@ -550,7 +574,7 @@ def render_full_pdf(
             [
                 r.subcategory_code,
                 Paragraph(escape(r.name), styles["cell"]),
-                f"L{r.enterprise_level}",
+                _ent_label(r),
                 f"L{r.target_level}" if r.target_level else "—",
                 ("Yes" if r.gap else ""),
                 r.priority or "",
@@ -563,7 +587,7 @@ def render_full_pdf(
                 body,
                 [0.9 * inch, 2.6 * inch, 0.85 * inch, 0.8 * inch, 0.6 * inch, 0.75 * inch],
                 color_col=2,
-                color_levels=[r.enterprise_level for r in frows],
+                color_levels=_ent_shades(frows),
             )
         )
 
@@ -580,7 +604,7 @@ def render_full_pdf(
             r.tier_levels.get("high", "—"),
             r.tier_levels.get("moderate", "—"),
             r.tier_levels.get("low", "—"),
-            f"L{r.enterprise_level}",
+            _ent_label(r),
             f"#{r.rollup_rule}",
             ("Yes" if r.gap else ""),
         ]
@@ -601,10 +625,7 @@ def render_full_pdf(
                 0.5 * inch,
             ],
             color_col=5,
-            color_levels=[
-                r.enterprise_level
-                for r in sorted(enterprise_rows, key=lambda r: r.subcategory_code)
-            ],
+            color_levels=_ent_shades(sorted(enterprise_rows, key=lambda r: r.subcategory_code)),
         )
     )
     doc.build(story)
@@ -695,14 +716,14 @@ def render_exec_docx(
                 [
                     g.subcategory_code,
                     g.name,
-                    f"L{g.enterprise_level}",
+                    _ent_label(g),
                     f"L{g.target_level}" if g.target_level else "—",
                     g.priority or "",
                 ]
                 for g in gaps
             ],
         )
-        _shade_col(table, 2, [g.enterprise_level for g in gaps])
+        _shade_col(table, 2, _ent_shades(gaps))
     else:
         add_paragraphs(doc, ["No gaps — every in-scope subcategory meets its target."])
 
@@ -768,7 +789,7 @@ def render_full_docx(
                 [
                     r.subcategory_code,
                     r.name,
-                    f"L{r.enterprise_level}",
+                    _ent_label(r),
                     f"L{r.target_level}" if r.target_level else "—",
                     ("Yes" if r.gap else ""),
                     r.priority or "",
@@ -776,7 +797,7 @@ def render_full_docx(
                 for r in frows
             ],
         )
-        _shade_col(table, 2, [r.enterprise_level for r in frows])
+        _shade_col(table, 2, _ent_shades(frows))
 
     add_page_break(doc)
     add_heading(doc, "5. Prioritized roadmap")
@@ -789,14 +810,14 @@ def render_full_docx(
                 [
                     g.subcategory_code,
                     g.name,
-                    f"L{g.enterprise_level}",
+                    _ent_label(g),
                     f"L{g.target_level}" if g.target_level else "—",
                     g.priority or "",
                 ]
                 for g in gaps
             ],
         )
-        _shade_col(table, 2, [g.enterprise_level for g in gaps])
+        _shade_col(table, 2, _ent_shades(gaps))
     else:
         add_paragraphs(doc, ["No gaps — every in-scope subcategory meets its target."])
 
@@ -813,12 +834,12 @@ def render_full_docx(
                 r.tier_levels.get("high", "—"),
                 r.tier_levels.get("moderate", "—"),
                 r.tier_levels.get("low", "—"),
-                f"L{r.enterprise_level}",
+                _ent_label(r),
                 f"#{r.rollup_rule}",
                 ("Yes" if r.gap else ""),
             ]
             for r in ordered_rows
         ],
     )
-    _shade_col(table, 5, [r.enterprise_level for r in ordered_rows])
+    _shade_col(table, 5, _ent_shades(ordered_rows))
     return to_bytes(doc)

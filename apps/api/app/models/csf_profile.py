@@ -10,9 +10,11 @@ math (total/level/evidence-cap/weighted-floor roll-up) is `app/csf/playbook.py`.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    DateTime,
     ForeignKey,
     SmallInteger,
     String,
@@ -63,3 +65,11 @@ class CsfDimensionScore(UUIDPKMixin, TimestampMixin, Base):
 
     # Work Order C2: locked rows are untouched by a Run-AI rerun.
     locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # FIX B-3: proof this row was actually scored. NULL means the row was only
+    # seeded (all five dimensions still at their 0 default) and has never been
+    # touched by a human or the AI. The Playbook export gate refuses to render a
+    # deliverable while any in-scope row is still NULL here, so an all-zero
+    # seeded row can never be mis-reported as a legitimate "Level 1". Set to the
+    # write time whenever a human patch or a Run-AI pass writes the row.
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -31,7 +31,12 @@ from app.models.client import Client
 from app.models.llm_call import LLMCall
 from app.models.user import User
 from app.storage import StorageBackend
-from app.tech_debt.parsers import parse_inventory
+from app.tech_debt.parsers import (
+    EmptyInventoryError,
+    data_rows,
+    parse_inventory,
+    was_truncated,
+)
 
 PROMPT_VERSION = "v1"
 
@@ -169,13 +174,29 @@ def extract_capabilities(
 ) -> ExtractionResult:
     """Top-level entry point used by the ingest route."""
     raw = _load_artifact_bytes(storage, artifact)
-    rows = parse_inventory(raw, artifact.mime_type)
+    parsed = parse_inventory(raw, artifact.mime_type)
+
+    # Skip the truncation sentinel everywhere rows are used: it must never be
+    # treated as a data row (or it becomes a phantom capability). It still
+    # drives the "truncated" signal we pass to the model as context.
+    rows = data_rows(parsed)
+    truncated = was_truncated(parsed)
+
+    # Zero-row guard: a header-only or unparseable-to-zero-rows file must NOT
+    # reach the LLM. Calling the model with nothing to extract is wasteful and
+    # invites fabricated output. Raise before any provider call.
+    if not rows:
+        raise EmptyInventoryError(
+            "No data rows found in this file; check that the inventory is on "
+            "the first sheet with a header row."
+        )
 
     payload: dict[str, Any] = {
         "rows": rows,
         "context": {
             "source_filename": artifact.title,
             "source_mime": artifact.mime_type,
+            "truncated": truncated,
         },
     }
 

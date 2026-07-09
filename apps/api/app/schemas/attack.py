@@ -117,9 +117,13 @@ class AttackRunAiResponse(BaseModel):
     tools_available: int
     changed: list[CoverageChange]
     coverage: list[AttackCoverageResponse]
-    # Batches (of the 600+ techniques) the AI provider couldn't reach this run.
-    # >0 means partial coverage — re-run to fill the rest.
+    # Under the fail-loud chunking rule (FIX A-3) a bad/missing batch aborts the
+    # whole run, so a returned response always had every batch succeed and this
+    # is always 0. Kept for response-shape stability.
     failed_batches: int = 0
+    # Non-fatal advisories surfaced to the admin (FIX G-2). E.g. the client has
+    # no APPROVED/RELEASED capability list, so the mapping can cite no tools.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AttackCoveragePatch(BaseModel):

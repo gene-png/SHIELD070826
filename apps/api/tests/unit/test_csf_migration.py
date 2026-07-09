@@ -66,3 +66,9 @@ def test_migration_creates_csf_tables(tmp_path) -> None:
 
     uq_answers = {u["name"] for u in insp.get_unique_constraints("csf_answers")}
     assert "uq_csf_answers_assessment_subcategory" in uq_answers
+
+    # FIX B-3 (migration 0029): the additive scored_at column exists and is
+    # nullable on SQLite (the test DB) after `alembic upgrade head`.
+    dim_cols = {c["name"]: c for c in insp.get_columns("csf_dimension_scores")}
+    assert "scored_at" in dim_cols
+    assert dim_cols["scored_at"]["nullable"] is True

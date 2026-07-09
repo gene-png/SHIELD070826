@@ -58,14 +58,18 @@ def app_client(tmp_path) -> Iterator[tuple[TestClient, FixtureProvider]]:
         yield c, provider
 
 
-def _bootstrap(c: TestClient) -> tuple[dict, str]:
+def _bootstrap(c: TestClient, tiers: list[str] | None = None) -> tuple[dict, str]:
     r = register_admin_resp(c, "admin@example.com")
     h = {"Authorization": f"Bearer {r.json()['tokens']['access_token']}"}
     svc_id = c.post("/csf/services", headers=h, json={"kind": "nist_csf", "title": "CSF"}).json()[
         "id"
     ]
     c.post(f"/csf/services/{svc_id}/assessments", headers=h)
-    c.post(f"/csf/services/{svc_id}/profiles/seed", headers=h, json={"tiers": ["high"]})
+    c.post(
+        f"/csf/services/{svc_id}/profiles/seed",
+        headers=h,
+        json={"tiers": tiers or ["high"]},
+    )
     return h, svc_id
 
 
@@ -113,6 +117,101 @@ def test_csf_run_ai_skips_locked(app_client) -> None:
     row = next(x for x in r.json()["rows"] if x["subcategory_code"] == code and x["tier"] == "high")
     assert row["governance"] == 0
     assert all(ch["subcategory_code"] != code for ch in r.json()["changed"])
+
+
+@pytest.mark.unit
+def test_csf_run_ai_payload_is_grounded(app_client) -> None:
+    """FIX A-2: the payload handed to run_job must carry the client's answers +
+    evidence context per subcategory, not just bare tier/subcategory codes."""
+    c, provider = app_client
+    h, svc_id = _bootstrap(c)
+    code = SUBCATEGORIES[0].code
+    # Record a client self-assessment answer so there is something to ground on.
+    latest = c.get(f"/csf/services/{svc_id}/assessments/latest", headers=h).json()
+    ans_id = next(a["id"] for a in latest["answers"] if a["subcategory_code"] == code)
+    c.patch(
+        f"/csf/answers/{ans_id}",
+        headers=h,
+        json={"maturity_tier": 2, "notes": "documented but not consistently enforced"},
+    )
+
+    captured: dict = {}
+
+    def _fx(payload):
+        captured["payload"] = payload
+        return LLMResponse('{"scores": []}')
+
+    provider.register("csf_score", _fx)
+    resp = c.post(f"/csf/services/{svc_id}/run-ai", headers=h)
+    assert resp.status_code == 200, resp.text
+
+    items = captured["payload"]["items"]
+    # Grounding keys present on every item — not just {tier, subcategory_code}.
+    assert all("self_assessment_tier" in it and "has_evidence" in it for it in items)
+    target = next(it for it in items if it["subcategory_code"] == code)
+    assert set(target) > {"tier", "subcategory_code"}
+    assert target["self_assessment_tier"] == 2
+    assert target["self_assessment_notes"]  # notes carried through (post-redaction)
+
+
+@pytest.mark.unit
+def test_csf_run_ai_chunks_by_tier_exactly_once(app_client) -> None:
+    """FIX A-3: one INDEPENDENT run_job call per tier, and every
+    (tier, subcategory_code) pair appears in exactly one chunk."""
+    c, provider = app_client
+    h, svc_id = _bootstrap(c, tiers=["high", "moderate", "low"])
+
+    tiers_called: list[str] = []
+    seen_pairs: list[tuple[str, str]] = []
+
+    def _fx(payload):
+        tiers_called.append(payload["tier"])
+        for item in payload["items"]:
+            # Each item's tier matches the chunk it was sent in.
+            assert item["tier"] == payload["tier"]
+            seen_pairs.append((item["tier"], item["subcategory_code"]))
+        return LLMResponse('{"scores": []}')
+
+    provider.register("csf_score", _fx)
+    resp = c.post(f"/csf/services/{svc_id}/run-ai", headers=h)
+    assert resp.status_code == 200, resp.text
+
+    # One chunk (one llm call) per tier.
+    assert sorted(tiers_called) == ["high", "low", "moderate"]
+    # Exactly-once coverage: no duplicates, and the full cross-product.
+    assert len(seen_pairs) == len(set(seen_pairs))
+    expected = {(t, sc.code) for t in ("high", "moderate", "low") for sc in SUBCATEGORIES}
+    assert set(seen_pairs) == expected
+
+
+@pytest.mark.unit
+def test_csf_run_ai_one_bad_chunk_applies_nothing(app_client) -> None:
+    """FIX A-3: if any chunk fails to parse, the whole run aborts (502) and
+    applies NOTHING — a half-applied assessment is worse than a failed one."""
+    c, provider = app_client
+    h, svc_id = _bootstrap(c, tiers=["high", "moderate", "low"])
+    code = SUBCATEGORIES[0].code
+
+    def _fx(payload):
+        if payload["tier"] == "low":
+            return LLMResponse("{ this is not valid json")
+        # high + moderate return perfectly valid, applicable scores.
+        return LLMResponse(
+            '{"scores": [{"tier": "' + payload["tier"] + '", "subcategory_code": "' + code + '",'
+            ' "governance": 2, "policy": 2, "implementation": 2}]}'
+        )
+
+    provider.register("csf_score", _fx)
+    resp = c.post(f"/csf/services/{svc_id}/run-ai", headers=h)
+    assert resp.status_code == 502, resp.text
+
+    # Even though high + moderate parsed fine, NOTHING was applied because low
+    # failed before the apply phase: the high row is still at its 0 default.
+    rows = c.get(f"/csf/services/{svc_id}/profile/high", headers=h).json()["rows"]
+    target = next(x for x in rows if x["subcategory_code"] == code)
+    assert target["governance"] == 0
+    assert target["policy"] == 0
+    assert target["implementation"] == 0
 
 
 @pytest.mark.unit

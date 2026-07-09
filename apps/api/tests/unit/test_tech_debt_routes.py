@@ -368,6 +368,128 @@ def test_extract_503_when_llm_returns_bad_json(app_client) -> None:
     assert r.status_code == 502
 
 
+@pytest.mark.unit
+def test_extract_header_only_csv_422_no_llm_call_no_list(app_client) -> None:
+    """A header-only inventory has zero data rows: the route must 422 BEFORE
+    any LLM call and must not create a CapabilityList (C-1 zero-row guard)."""
+    c, TestSession, provider = app_client
+    admin = register_admin(c, "admin@example.com")
+    bearer = admin["tokens"]["access_token"]
+
+    called = {"n": 0}
+
+    def spy(_payload: dict) -> LLMResponse:
+        called["n"] += 1
+        return LLMResponse('{"items": []}')
+
+    provider.register("extract.capabilities", spy)
+
+    sr = c.post(
+        "/tech-debt/services",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"title": "x"},
+    )
+    svc_id = sr.json()["id"]
+    # Header row only -> zero data rows.
+    artifact_id = _upload_csv(c, bearer, "empty.csv", b"Tool,Vendor,Annual Cost\n")
+
+    r = c.post(
+        f"/tech-debt/services/{svc_id}/capability-lists/extract",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"artifact_id": artifact_id},
+    )
+    assert r.status_code == 422, r.text
+    assert "No data rows found" in r.json()["error"]["message"]
+
+    # The model was never called and no rows were persisted.
+    assert called["n"] == 0
+    with TestSession() as db:
+        assert db.execute(select(LLMCall)).all() == []
+        assert db.execute(select(CapabilityList)).all() == []
+
+
+@pytest.mark.unit
+def test_extract_caps_rows_at_500_and_reports_truncation(app_client) -> None:
+    """A 501-row input yields exactly 500 items with no phantom row 501, and
+    the truncation sentinel drives a 'truncated' signal (not a data row)."""
+    c, _, provider = app_client
+    admin = register_admin(c, "admin@example.com")
+    bearer = admin["tokens"]["access_token"]
+
+    captured: dict = {}
+
+    def echo(payload: dict) -> LLMResponse:
+        captured["payload"] = payload
+        # One item per row the model actually received. A leaked sentinel row
+        # (which lacks the "Tool" key) would surface as a "PHANTOM" item.
+        items = [{"name": row.get("Tool", "PHANTOM")} for row in payload["rows"]]
+        return LLMResponse(json.dumps({"items": items}))
+
+    provider.register("extract.capabilities", echo)
+
+    sr = c.post(
+        "/tech-debt/services",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"title": "x"},
+    )
+    svc_id = sr.json()["id"]
+
+    lines = [b"Tool"] + [f"Capability {i}".encode() for i in range(1, 502)]
+    csv_bytes = b"\n".join(lines) + b"\n"
+    artifact_id = _upload_csv(c, bearer, "big.csv", csv_bytes)
+
+    r = c.post(
+        f"/tech-debt/services/{svc_id}/capability-lists/extract",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"artifact_id": artifact_id},
+    )
+    assert r.status_code == 201, r.text
+    names = [i["name"] for i in r.json()["items"]]
+    assert len(names) == 500
+    assert "PHANTOM" not in names  # sentinel never reached the model
+    assert "Capability 500" in names
+    assert "Capability 501" not in names  # 501st row dropped by the cap
+
+    # The model received exactly 500 data rows and a truncated=True signal.
+    assert len(captured["payload"]["rows"]) == 500
+    assert captured["payload"]["context"]["truncated"] is True
+
+
+@pytest.mark.unit
+def test_extract_corrupt_xlsx_422_not_500(app_client) -> None:
+    """Bytes advertised as .xlsx that openpyxl can't open (legacy .xls or a
+    corrupt upload) must 422 with a clear message, not crash with a 500."""
+    c, _, provider = app_client
+    admin = register_admin(c, "admin@example.com")
+    bearer = admin["tokens"]["access_token"]
+    provider.register("extract.capabilities", lambda _p: LLMResponse('{"items": []}'))
+
+    sr = c.post(
+        "/tech-debt/services",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"title": "x"},
+    )
+    svc_id = sr.json()["id"]
+
+    # Upload garbage under the real .xlsx MIME (openpyxl -> BadZipFile).
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    r = c.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={"file": ("broken.xlsx", io.BytesIO(b"this is not a real xlsx file"), xlsx_mime)},
+    )
+    assert r.status_code == 201, r.text
+    artifact_id = r.json()["id"]
+
+    r = c.post(
+        f"/tech-debt/services/{svc_id}/capability-lists/extract",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"artifact_id": artifact_id},
+    )
+    assert r.status_code == 422, r.text
+    assert "valid .xlsx workbook" in r.json()["error"]["message"]
+
+
 def _create_list_with_item(
     c: TestClient, bearer: str, provider: FixtureProvider
 ) -> tuple[str, str]:

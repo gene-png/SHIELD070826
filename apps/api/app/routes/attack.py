@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
 
 from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
@@ -50,7 +50,11 @@ from app.models.attack_assessment import (
     AttackAssessmentStatus,
     AttackCoverage,
 )
-from app.models.capability import CapabilityItem, CapabilityList
+from app.models.capability import (
+    CapabilityItem,
+    CapabilityList,
+    CapabilityListStatus,
+)
 from app.models.client import Client
 from app.models.deliverable import Deliverable
 from app.models.service import Service, ServiceKind, ServiceStatus
@@ -402,12 +406,41 @@ def _llm_dep() -> LLMClient:
     return LLMClient.from_settings()
 
 
+# FIX G-2: RELEASED counts as approved-or-better. A CapabilityList moves
+# DRAFT -> APPROVED -> RELEASED; RELEASED is an APPROVED list that was also
+# delivered to the client, so it is strictly more finalized than APPROVED and
+# must remain citable. Only DRAFT (unfinished / possibly-abandoned) is excluded.
+_APPROVED_CAPABILITY_STATUSES = (
+    CapabilityListStatus.APPROVED,
+    CapabilityListStatus.RELEASED,
+)
+
+
 def _client_tool_names(db: Session, client_id: uuid.UUID) -> list[str]:
-    """Tool names from the client's Tech Debt capability list(s), if any.
+    """Tool names from the client's LATEST APPROVED Tech Debt capability lists.
 
     ATT&CK maps the client's security tooling to techniques; the canonical
     source is the Tech Debt approved capability list (Work Order D2).
+
+    FIX G-2: cite only the LATEST approved-or-better (APPROVED/RELEASED) list
+    version PER tech-debt service, unioned across the client's services. Without
+    the status + version filter, abandoned DRAFT tool names and every superseded
+    prior version stayed citable forever, so ATT&CK coverage could cite tools the
+    client never actually approved (or dropped in a later revision).
     """
+    # Per tech-debt service, the newest approved-or-better list version. The
+    # correlated subquery matches the OUTER CapabilityList's service, so each
+    # service contributes only its latest approved list; DRAFTs and superseded
+    # versions are filtered out.
+    _newest = aliased(CapabilityList)
+    latest_version = (
+        select(func.max(_newest.version))
+        .where(
+            _newest.service_id == CapabilityList.service_id,
+            _newest.status.in_(_APPROVED_CAPABILITY_STATUSES),
+        )
+        .scalar_subquery()
+    )
     names = (
         db.execute(
             select(CapabilityItem.name)
@@ -416,6 +449,8 @@ def _client_tool_names(db: Session, client_id: uuid.UUID) -> list[str]:
             .where(
                 Service.client_id == client_id,
                 Service.kind == ServiceKind.TECH_DEBT,
+                CapabilityList.status.in_(_APPROVED_CAPABILITY_STATUSES),
+                CapabilityList.version == latest_version,
             )
         )
         .scalars()
@@ -432,6 +467,44 @@ _DIFF_FIELDS = (
     "response_tools",
     "rationale",
 )
+
+# FIX A-3: mitre_map is pinned to claude-haiku-4-5, whose HARD output ceiling is
+# 64K tokens. A terse full-Enterprise map is ~65K output tokens, so a single
+# call would truncate mid-JSON (or be rejected). Chunking is therefore a hard
+# prerequisite of the model pin, not an optimization. We batch BY TACTIC, then
+# split any oversized tactic so each call stays comfortably under the cap.
+_MITRE_CHUNK_MAX = 90
+
+# Each technique's PRIMARY tactic: the first tactic in its catalog entry
+# (sub-techniques inherit their parent's tactics). Keys every code to exactly
+# one batch so coverage is exactly-once — no code lands in two tactic batches.
+_PRIMARY_TACTIC: dict[str, str] = {
+    t.id: (t.tactics[0] if t.tactics else "_unmapped") for t in TECHNIQUES
+}
+# Deterministic batch ordering: catalog tactic order, unmapped codes last.
+_TACTIC_ORDER: list[str] = [t.id for t in TACTICS] + ["_unmapped"]
+
+
+def _chunk_by_tactic(codes: list[str]) -> list[list[str]]:
+    """Partition technique codes into per-tactic batches for mitre_map.
+
+    Every input code is assigned to EXACTLY ONE batch (its primary tactic;
+    codes absent from the catalog fall into a trailing '_unmapped' batch), so
+    the union of all batches equals the input set with no duplicates and no
+    omissions. Tactics larger than ``_MITRE_CHUNK_MAX`` are split into
+    consecutive sub-batches so each call's output stays under Haiku's cap.
+    """
+    groups: dict[str, list[str]] = {}
+    for code in codes:
+        groups.setdefault(_PRIMARY_TACTIC.get(code, "_unmapped"), []).append(code)
+    batches: list[list[str]] = []
+    for key in sorted(
+        groups, key=lambda k: _TACTIC_ORDER.index(k) if k in _TACTIC_ORDER else len(_TACTIC_ORDER)
+    ):
+        group = sorted(groups[key])
+        for i in range(0, len(group), _MITRE_CHUNK_MAX):
+            batches.append(group[i : i + _MITRE_CHUNK_MAX])
+    return batches
 
 
 @router.post(
@@ -488,29 +561,38 @@ def run_ai(
     before = _snap()
     client_org = None if client.legal_name == "(pending intake)" else client.legal_name
 
-    # MITRE ATT&CK Enterprise is 600+ techniques. Asking the model to score every
-    # technique in one request produces a response far larger than a single
-    # completion can hold, and the long-running non-streaming call gets dropped
-    # by the API ("server disconnected without sending a response"). Batch the
-    # technique codes into small chunks so each call is fast and reliable; each
-    # chunk writes its own llm_calls row for audit.
-    # One large AI call scores every technique at once. The LLM client streams
-    # the response (app.ai.llm), so even the full 600+ technique map returns in
-    # a single request without hitting the non-streaming timeout or a dropped
-    # connection. run_job records the llm_calls row; on an upstream failure it
-    # re-raises, which we translate into a clean 502 rather than a 500 stack.
-    failed_batches = 0
+    # FIX G-2: surface (don't swallow) an empty tool universe. When the client
+    # has no APPROVED/RELEASED capability list, the mapping can still score
+    # gap/not_applicable but will cite no tools — the admin must know that.
+    warnings: list[str] = []
+    if not tools:
+        warnings.append("No approved capability list; mapping will cite no tools.")
+
+    # FIX A-3: mitre_map is pinned to claude-haiku-4-5 (64K hard output ceiling).
+    # Scoring all 600+ Enterprise techniques in one call would exceed that and
+    # truncate mid-JSON, so we batch BY TACTIC and issue one run_job per batch —
+    # each batch redacts + writes its own llm_calls audit row through the same
+    # client. We MERGE every batch's suggestions and apply NOTHING until ALL
+    # batches parse successfully: a bad/missing batch aborts the whole run
+    # (FAIL LOUDLY) so the assessment is never left half-applied. Every input
+    # code is covered by exactly one batch (see _chunk_by_tactic).
+    suggestions: list[Any] = []
     try:
-        result = run_job(
-            db,
-            llm,
-            "mitre_map",
-            inputs={"capability_list": tools, "technique_codes": sorted(rows)},
-            requested_by=user.id,
-            service_id=svc.id,
-            client_org_name=client_org,
-        )
-    except Exception as exc:  # noqa: BLE001 - boundary: surface a clean error
+        for batch in _chunk_by_tactic(sorted(rows)):
+            result = run_job(
+                db,
+                llm,
+                "mitre_map",
+                inputs={"capability_list": tools, "technique_codes": batch},
+                requested_by=user.id,
+                service_id=svc.id,
+                client_org_name=client_org,
+            )
+            data = result.data if isinstance(result.data, dict) else None
+            if data is None or "techniques" not in data:
+                raise ValueError("mitre_map batch returned no 'techniques' array")
+            suggestions.extend(data.get("techniques") or [])
+    except Exception as exc:  # noqa: BLE001 - boundary: fail loud, apply nothing
         _log.warning(
             "attack_run_ai_failed",
             service_id=str(svc.id),
@@ -518,9 +600,11 @@ def run_ai(
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The AI provider was unreachable. Please retry.",
+            detail=(
+                "The AI mapping failed: a batch was unreachable or returned invalid "
+                "data. Nothing was applied — please retry."
+            ),
         ) from exc
-    suggestions = list((result.data or {}).get("techniques", []))
 
     def _validate_tools(names: object) -> list[str]:
         if not isinstance(names, list):
@@ -579,7 +663,10 @@ def run_ai(
         tools_available=len(tools),
         changed=changes,
         coverage=coverage,
-        failed_batches=failed_batches,
+        # Fail-loud chunking: any batch failure already raised above, so a
+        # returned response always had every batch succeed.
+        failed_batches=0,
+        warnings=warnings,
     )
 
 

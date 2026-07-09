@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -44,6 +45,7 @@ from app.csf.exporters import build_context as build_csf_context
 from app.csf.exporters import render_docx as render_csf_docx
 from app.csf.exporters import render_pdf as render_csf_pdf
 from app.csf.exporters import render_xlsx as render_csf_xlsx
+from app.csf.gap import DEFAULT_TARGET_TIER
 from app.csf.gap import analyze as analyze_gaps
 from app.csf.maturity import TIER_DEFINITIONS
 from app.csf.playbook import (
@@ -928,6 +930,11 @@ def patch_dimension_score(
             setattr(row, f, data[f])
         elif f in data and f in ("rationale", "what_we_found", "target_level"):
             setattr(row, f, None)  # explicit clear allowed for nullable text/target
+    # FIX B-3: a human scoring the row (any of the five dimensions, the evidence
+    # flag, or the narrative) stamps scored_at so the export gate counts it as
+    # assessed. Toggling only in_scope / lock / target is not "scoring".
+    if any(f in data for f in (*_DIM_FIELDS, "has_evidence", "what_we_found")):
+        row.scored_at = utcnow()
     db.commit()
     return _score_response(row)
 
@@ -1066,26 +1073,88 @@ def run_ai(
 
     before = _snap()
     client_org = None if client.legal_name == "(pending intake)" else client.legal_name
-    result = run_job(
-        db,
-        llm,
-        "csf_score",
-        inputs={
-            "tiers": sorted({r.tier for r in rows.values()}),
-            "subcategories": sorted({r.subcategory_code for r in rows.values()}),
-        },
-        requested_by=user.id,
-        service_id=svc.id,
-        client_org_name=client_org,
-    )
-    data = result.data if isinstance(result.data, dict) else {}
 
-    for sugg in data.get("scores", []):
+    # FIX A-2: ground the payload. The prompt promises the model "interview
+    # answers, evidence summaries, and per-subcategory context", but the old
+    # payload sent only bare tier strings + subcategory codes, so even a
+    # schema-correct response was scored from nothing. Hand the model, per
+    # (tier, subcategory_code): the client's own self-assessment answer (tier +
+    # notes) from the CsfAnswer rows, the evidence flags, and the subcategory's
+    # catalog context. Redaction runs downstream in LLMClient.invoke — we pass
+    # the raw notes here and let it strip PII; we do not pre-redact.
+    answers_by_code = {
+        ans.subcategory_code: ans
+        for ans in db.execute(select(CsfAnswer).where(CsfAnswer.assessment_id == a.id))
+        .scalars()
+        .all()
+    }
+
+    def _ground(r: CsfDimensionScore) -> dict:
+        ans = answers_by_code.get(r.subcategory_code)
+        sc = subcategory_by_code(r.subcategory_code)
+        return {
+            "tier": r.tier,
+            "subcategory_code": r.subcategory_code,
+            "subcategory_name": getattr(sc, "name", None),
+            "function": str(getattr(sc, "function", "")),
+            "outcome": getattr(sc, "outcome", None),
+            "in_scope": r.in_scope,
+            "self_assessment_tier": ans.maturity_tier if ans else None,
+            "self_assessment_notes": ans.notes if ans else None,
+            "assessor_rationale": r.rationale,
+            "prior_narrative": r.what_we_found,
+            "has_evidence": r.has_evidence,
+            "evidence_provided": bool(r.evidence_artifact_id)
+            or (ans is not None and ans.evidence_artifact_id is not None),
+            "target_level": r.target_level,
+        }
+
+    # FIX A-3: chunk by FIPS tier. csf_score is pinned to Haiku (64K max output);
+    # one un-chunked call carries every seeded (tier x subcategory) row — up to
+    # ~3 x 106 = 318 entries — which risks a truncated, unparseable response.
+    # Each tier chunk holds at most len(SUBCATEGORIES) (~106) entries, well under
+    # the cap, and is an INDEPENDENT run_job call, so redaction + one llm_calls
+    # row per chunk still happen. `tier` is part of every row's key, so every
+    # (tier, subcategory_code) pair lands in EXACTLY ONE chunk.
+    chunks: dict[str, list[CsfDimensionScore]] = {}
+    for r in rows.values():
+        chunks.setdefault(r.tier, []).append(r)
+
+    merged_scores: list = []
+    for tier in sorted(chunks):
+        try:
+            result = run_job(
+                db,
+                llm,
+                "csf_score",
+                inputs={"tier": tier, "items": [_ground(r) for r in chunks[tier]]},
+                requested_by=user.id,
+                service_id=svc.id,
+                client_org_name=client_org,
+            )
+        except ValueError as exc:
+            # CRITICAL: one bad chunk aborts the whole run and applies NOTHING.
+            # No score row has been mutated yet (application happens only after
+            # every chunk parses), so the transaction rolls back clean. A
+            # half-applied assessment is worse than a failed one.
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    f"AI scoring failed for the {tier!r} tier chunk; no scores "
+                    "were applied. Re-run once the model returns valid JSON."
+                ),
+            ) from exc
+        data = result.data if isinstance(result.data, dict) else {}
+        merged_scores.extend(data.get("scores", []))
+
+    # Apply only AFTER every chunk parsed.
+    for sugg in merged_scores:
         if not isinstance(sugg, dict):
             continue
         row = rows.get(f"{sugg.get('tier')}|{sugg.get('subcategory_code')}")
         if row is None or row.locked:
             continue
+        touched = False
         for dim in _DIM_FIELDS:
             if dim in sugg:
                 try:
@@ -1094,8 +1163,12 @@ def run_ai(
                     continue
                 if 0 <= v <= 2:
                     setattr(row, dim, v)
+                    touched = True
         if isinstance(sugg.get("what_we_found"), str):
             row.what_we_found = sugg["what_we_found"]
+            touched = True
+        if touched:
+            row.scored_at = utcnow()  # FIX B-3: the AI wrote this row.
 
     db.flush()
     after = _snap()
@@ -1155,7 +1228,46 @@ def export_playbook(
             status_code=status.HTTP_409_CONFLICT,
             detail="Seed the Working Profile before exporting.",
         )
+    # FIX B-3: HARD gate. Seeding creates every row with all five dimensions at 0,
+    # which the maturity math reads as a legitimate "Level 1", so exporting right
+    # after "Seed Working Profiles" produced a full deliverable asserting L1
+    # across every subcategory before anyone assessed anything (and cleared the
+    # stale-documents flag as if the docs were current). Block unless EVERY
+    # in-scope row has actually been scored (scored_at, set by a human patch or a
+    # Run-AI pass) AND the assessment is approved. Product decision: no
+    # draft-export path. Out-of-scope rows are excluded from the roll-up, so they
+    # need no score. Nothing below this point (including clearing documents_stale)
+    # runs unless the gate passes.
+    in_scope_rows = [r for r in all_rows if r.in_scope]
+    unscored = [r for r in in_scope_rows if r.scored_at is None]
+    if unscored:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot export the Playbook: {len(unscored)} in-scope subcategory "
+                "row(s) are still unscored. Score every row (Run AI or manual) and "
+                "approve the assessment before exporting."
+            ),
+        )
+    if a.status not in (CsfAssessmentStatus.APPROVED, CsfAssessmentStatus.RELEASED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot export the Playbook: the assessment must be approved before exporting.",
+        )
     enterprise_rows, _ = _enterprise_subcategories(db, a)
+    # Belt and braces (FIX B-3 layer 3): tag every rendered row with whether it
+    # was actually scored, so a null-scored row that somehow reaches an exporter
+    # renders "Unscored" — never a bogus "Level 1". A code is "scored" only if
+    # ALL of its in-scope tier rows are scored. Unreachable while the gate holds.
+    code_scored: dict[str, bool] = {}
+    for r in in_scope_rows:
+        code_scored[r.subcategory_code] = code_scored.get(r.subcategory_code, True) and (
+            r.scored_at is not None
+        )
+    enterprise_rows = [
+        SimpleNamespace(**er.model_dump(), scored=code_scored.get(er.subcategory_code, True))
+        for er in enterprise_rows
+    ]
     tier_profiles: dict[str, list] = {}
     for tier in ("high", "moderate", "low"):
         trows = sorted(
@@ -1163,7 +1275,10 @@ def export_playbook(
             key=lambda r: r.subcategory_code,
         )
         if trows:
-            tier_profiles[tier] = [_score_response(r) for r in trows]
+            tier_profiles[tier] = [
+                SimpleNamespace(**_score_response(r).model_dump(), scored=r.scored_at is not None)
+                for r in trows
+            ]
 
     from app.docx_export import DOCX_MIME
 
@@ -1371,7 +1486,15 @@ def finalize_csf_deliverable(
         r.subcategory_code: r.notes for r in answers if r.subcategory_code in valid
     }
     score = compute_score(tier_map)
-    gap = analyze_gaps(tier_map, notes=notes_map)
+    # FIX B-2: honor the client's chosen target tier. The old call passed no
+    # target, so finalize always measured against DEFAULT_TARGET_TIER (3) — a
+    # client targeting T4 (or T2) got a Gap Plan that disagreed with the
+    # workspace gap list. Resolve the target from the originating
+    # ServiceRequest.csf_target_tier, falling back to the default; the summary
+    # line below prints the resolved tier so the document states its assumption.
+    resolved = _client_target_tier(db, svc.id)
+    target_tier = resolved if (resolved is not None and 1 <= resolved <= 4) else DEFAULT_TARGET_TIER
+    gap = analyze_gaps(tier_map, notes=notes_map, target_tier=target_tier)
 
     client_name = client.legal_name
     if client_name == "(pending intake)":

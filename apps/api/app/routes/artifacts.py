@@ -40,7 +40,6 @@ ALLOWED_MIME = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
     "application/msword",
     "text/csv",
     "text/plain",
@@ -48,6 +47,11 @@ ALLOWED_MIME = {
     "image/jpeg",
     "application/zip",
 }
+
+# Legacy OLE2 Excel. Advertised by old exports but unreadable by openpyxl
+# (the extraction path), so it would crash downstream. Reject at upload with
+# an actionable message instead of silently accepting a file we can't parse.
+LEGACY_XLS_MIME = "application/vnd.ms-excel"
 
 
 def _safe_title(name: str) -> str:
@@ -77,6 +81,11 @@ async def upload_artifact(
     notes: Annotated[str | None, Form()] = None,
 ) -> ArtifactResponse:
     mime = file.content_type or "application/octet-stream"
+    if mime == LEGACY_XLS_MIME:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Legacy .xls is not supported; re-save the file as .xlsx and upload again.",
+        )
     if mime not in ALLOWED_MIME:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

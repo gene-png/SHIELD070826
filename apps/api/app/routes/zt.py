@@ -91,7 +91,7 @@ from app.zt.exporters import render_html_dashboard as render_zt_html
 from app.zt.exporters import render_pdf as render_zt_pdf
 from app.zt.exporters import render_xlsx as render_zt_xlsx
 from app.zt.maturity import ZtFrameworkCode, level_count, stage_definitions
-from app.zt.scoring import analyze_gaps, build_roadmap
+from app.zt.scoring import DEFAULT_TARGET_STAGE, analyze_gaps, build_roadmap
 from app.zt.scoring import compute as compute_score
 
 router = APIRouter(prefix="/zt", tags=["zt"])
@@ -148,6 +148,40 @@ def _client_target_stage(db: Session, service_id: uuid.UUID) -> int | None:
         return None
     sr = db.get(ServiceRequest, svc.source_request_id)
     return sr.zt_target_stage if sr is not None else None
+
+
+def _resolve_gap_targets(
+    db: Session,
+    service_id: uuid.UUID,
+    rows: Iterable[ZtAnswer],
+    valid: set[str],
+    *,
+    target_stage: int | None = None,
+) -> tuple[int, dict[str, int | None]]:
+    """Resolve the two target inputs `analyze_gaps` consumes, identically for
+    the dashboard gap endpoint and the deliverable finalize path so the two
+    can never disagree.
+
+    The B-1 defect was finalize computing gaps against the hardcoded default
+    target while the dashboard used the client's real target; this single
+    helper is the fix -- both call sites go through here.
+
+    Returns ``(engagement_target_stage, per_capability_targets)``. Precedence
+    for the engagement-level stage:
+
+    1. an explicit ``target_stage`` override (the dashboard's query param),
+    2. the client's chosen ZT target on the originating ``ServiceRequest``,
+    3. ``DEFAULT_TARGET_STAGE``.
+
+    Per-capability targets always override the engagement value inside
+    ``analyze_gaps``.
+    """
+    targets: dict[str, int | None] = {
+        r.capability_code: r.target_stage for r in rows if r.capability_code in valid
+    }
+    if target_stage is None:
+        target_stage = _client_target_stage(db, service_id) or DEFAULT_TARGET_STAGE
+    return target_stage, targets
 
 
 def _serialize_assessment(db: Session, a: ZtAssessment) -> ZtAssessmentResponse:
@@ -871,7 +905,7 @@ def gap_analysis(
     user: Annotated[User, _admin_required],
     client: Annotated[Client, Depends(current_client)],
     db: Annotated[Session, Depends(get_db)],
-    target_stage: int = 3,
+    target_stage: int | None = None,
     top_n: int = 20,
 ) -> GapAnalysisResponse:
     svc = require_service_in_tenant(db, service_id, client.id)
@@ -895,9 +929,7 @@ def gap_analysis(
     notes: dict[str, str | None] = {
         r.capability_code: r.notes for r in rows if r.capability_code in valid
     }
-    targets: dict[str, int | None] = {
-        r.capability_code: r.target_stage for r in rows if r.capability_code in valid
-    }
+    target_stage, targets = _resolve_gap_targets(db, svc.id, rows, valid, target_stage=target_stage)
     analysis = analyze_gaps(
         cat_fw,
         answers,
@@ -1070,7 +1102,17 @@ def finalize_zt_deliverable(
         r.capability_code: r.notes for r in answers if r.capability_code in valid
     }
     score = compute_score(cat_fw, stage_map)
-    gap = analyze_gaps(cat_fw, stage_map, notes=notes_map)
+    # B-1: resolve the SAME target the dashboard resolves (per-capability
+    # targets + the client's engagement-level goal) so the signed deliverable
+    # can never contradict the gap count the consultant reviewed on screen.
+    target_stage, targets = _resolve_gap_targets(db, svc.id, answers, valid)
+    gap = analyze_gaps(
+        cat_fw,
+        stage_map,
+        notes=notes_map,
+        target_stage=target_stage,
+        targets=targets,
+    )
 
     client_name = client.legal_name
     if client_name == "(pending intake)":

@@ -57,34 +57,63 @@ def app_client(tmp_path) -> Iterator[TestClient]:
         yield c, cid
 
 
+def _score_all(c: TestClient, h: dict, svc_id: str, tier: str) -> int:
+    """Score every seeded row in `tier` at L3 (total 6, evidence present so no
+    cap). Returns the number of rows scored."""
+    rows = c.get(f"/csf/services/{svc_id}/profile/{tier}", headers=h).json()["rows"]
+    for row in rows:
+        r = c.patch(
+            f"/csf/dimension-scores/{row['id']}",
+            headers=h,
+            json={
+                "governance": 2,
+                "policy": 2,
+                "implementation": 2,
+                "has_evidence": True,
+                "target_level": 4,
+            },
+        )
+        assert r.status_code == 200, r.text
+    return len(rows)
+
+
 @pytest.mark.unit
-def test_playbook_export_produces_downloadable_xlsx(app_client) -> None:
+def test_playbook_export_blocked_until_scored_and_approved(app_client) -> None:
+    """FIX B-3: the export is a HARD gate. Seed -> export must 409 and name the
+    unscored row count (the pre-fix bug shipped a five-artifact deliverable
+    asserting Level 1 for every subcategory straight after seeding). Only after
+    EVERY in-scope row is scored AND the assessment is approved does it 200, and
+    no cell may read "Unscored" or a default "L1"."""
     c, cid = app_client
     r = register_admin_resp(c, "admin@example.com")
     h = {"Authorization": f"Bearer {r.json()['tokens']['access_token']}"}
     svc_id = c.post("/csf/services", headers=h, json={"kind": "nist_csf", "title": "CSF"}).json()[
         "id"
     ]
-    c.post(f"/csf/services/{svc_id}/assessments", headers=h)
+    assessment = c.post(f"/csf/services/{svc_id}/assessments", headers=h).json()
 
     # Locked before seeding.
     assert c.post(f"/csf/services/{svc_id}/playbook/export", headers=h).status_code == 409
 
-    c.post(f"/csf/services/{svc_id}/profiles/seed", headers=h, json={"tiers": ["high", "moderate"]})
-    # Give one subcategory some scores so the sheets have content.
-    code = SUBCATEGORIES[0].code
-    rows = c.get(f"/csf/services/{svc_id}/profile/high", headers=h).json()["rows"]
-    sid = next(x["id"] for x in rows if x["subcategory_code"] == code)
-    c.patch(
-        f"/csf/dimension-scores/{sid}",
-        headers=h,
-        json={"governance": 2, "policy": 2, "has_evidence": True, "target_level": 4},
-    )
+    c.post(f"/csf/services/{svc_id}/profiles/seed", headers=h, json={"tiers": ["high"]})
 
+    # Seeded but unscored -> 409 whose message names the unscored count.
+    blocked = c.post(f"/csf/services/{svc_id}/playbook/export", headers=h)
+    assert blocked.status_code == 409, blocked.text
+    n = len(SUBCATEGORIES)
+    assert str(n) in blocked.json()["error"]["message"], blocked.json()
+
+    # Score every row, but do NOT approve yet -> still 409 (on approval).
+    assert _score_all(c, h, svc_id, "high") == n
+    pre_approve = c.post(f"/csf/services/{svc_id}/playbook/export", headers=h)
+    assert pre_approve.status_code == 409, pre_approve.text
+    assert "approved" in pre_approve.json()["error"]["message"].lower()
+
+    # Approve -> export now succeeds.
+    c.post(f"/csf/assessments/{assessment['id']}/approve", headers=h)
     ex = c.post(f"/csf/services/{svc_id}/playbook/export", headers=h)
     assert ex.status_code == 200, ex.text
     arts = {a["kind"]: a for a in ex.json()["artifacts"]}
-    # XLSX workbook + executive briefing (PDF+Word) + full playbook (PDF+Word).
     assert set(arts) == {"xlsx", "exec_pdf", "exec_docx", "full_pdf", "full_docx"}
 
     dh = {**h, "X-Client-Id": cid}
@@ -99,3 +128,22 @@ def test_playbook_export_produces_downloadable_xlsx(app_client) -> None:
         dl = c.get(f"/artifacts/{art['artifact_id']}/download", headers=dh)
         assert dl.status_code == 200, f"{kind}: {dl.status_code}"
         assert dl.content.startswith(magic[kind]), f"{kind} wrong magic bytes"
+
+    # Parse the real XLSX bytes: no data cell may read "Unscored" or a bogus "L1"
+    # (every row was scored to L3). The methodology prose mentions "L1 0-2" but
+    # never as a bare cell value, so an exact match is safe.
+    import io
+
+    from openpyxl import load_workbook
+
+    dl = c.get(f"/artifacts/{arts['xlsx']['artifact_id']}/download", headers=dh)
+    wb = load_workbook(io.BytesIO(dl.content))
+    seen_level_cell = False
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            for val in row:
+                assert val != "Unscored", f"{ws.title}: an unscored cell leaked"
+                assert val != "L1", f"{ws.title}: a default L1 cell leaked"
+                if val == "L3":
+                    seen_level_cell = True
+    assert seen_level_cell, "expected scored L3 level cells in the workbook"

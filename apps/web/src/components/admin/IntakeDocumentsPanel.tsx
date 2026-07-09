@@ -17,14 +17,11 @@ import { type ArtifactSummary, listArtifacts } from "@/lib/intake/artifacts";
 const SPREADSHEET_MIME = new Set([
   "text/csv",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-excel",
 ]);
 
 /** Tech-debt extraction only accepts a tabular inventory (CSV/XLSX). */
 function isInventory(a: ArtifactSummary): boolean {
-  return (
-    SPREADSHEET_MIME.has(a.mime_type) || /\.(csv|xlsx|xls)$/i.test(a.title)
-  );
+  return SPREADSHEET_MIME.has(a.mime_type) || /\.(csv|xlsx)$/i.test(a.title);
 }
 
 export interface IntakeDocumentsPanelProps {

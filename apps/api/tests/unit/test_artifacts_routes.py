@@ -130,6 +130,29 @@ def test_upload_rejects_unknown_mime(app_client) -> None:
 
 
 @pytest.mark.unit
+def test_upload_rejects_legacy_xls_with_actionable_message(app_client) -> None:
+    """Legacy OLE2 .xls crashes openpyxl downstream, so it is rejected at
+    upload with a typed 415 telling the user to re-save as .xlsx (C-2)."""
+    client, _, _ = app_client
+    bearer = _bearer(client)
+    r = client.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={
+            "file": (
+                "inventory.xls",
+                io.BytesIO(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy-ole2-bytes"),
+                "application/vnd.ms-excel",
+            )
+        },
+    )
+    assert r.status_code == 415, r.text
+    assert r.json()["error"]["message"] == (
+        "Legacy .xls is not supported; re-save the file as .xlsx and upload again."
+    )
+
+
+@pytest.mark.unit
 def test_upload_rejects_empty_file(app_client) -> None:
     client, _, _ = app_client
     bearer = _bearer(client)

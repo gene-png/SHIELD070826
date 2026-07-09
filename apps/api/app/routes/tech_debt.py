@@ -63,7 +63,12 @@ from app.tech_debt.filename import (
     deliverable_filename,
 )
 from app.tech_debt.overlap import analyze_overlap
-from app.tech_debt.parsers import SUPPORTED_MIME, UnsupportedInventoryFormat
+from app.tech_debt.parsers import (
+    SUPPORTED_MIME,
+    CorruptInventoryError,
+    EmptyInventoryError,
+    UnsupportedInventoryFormat,
+)
 from app.tenant import (
     require_artifact_in_tenant,
     require_service_in_tenant,
@@ -182,6 +187,14 @@ def extract_capability_list(
     except UnsupportedInventoryFormat as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
+    except (EmptyInventoryError, CorruptInventoryError) as exc:
+        # Zero data rows (header-only/blank) or a file that can't be opened as
+        # a valid .xlsx (legacy .xls bytes, truncated/corrupt upload). Both are
+        # client-fixable, and neither should reach the LLM or 500.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
     except ValueError as exc:
