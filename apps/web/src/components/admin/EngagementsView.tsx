@@ -25,7 +25,9 @@ function statusTone(
 }
 
 export function EngagementsView(): JSX.Element {
-  const [services, setServices] = React.useState<AdminServiceRow[] | null>(null);
+  const [services, setServices] = React.useState<AdminServiceRow[] | null>(
+    null,
+  );
   const [showArchived, setShowArchived] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);

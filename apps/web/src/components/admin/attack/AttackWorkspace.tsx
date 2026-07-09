@@ -375,8 +375,8 @@ export function AttackWorkspace({
                   {runResult.failed_batches} batch
                   {runResult.failed_batches === 1 ? "" : "es"} of techniques
                   couldn&apos;t be reached this run (transient provider issue).
-                  The rest were scored — click <b>Run AI</b> again to fill in the
-                  remaining techniques.
+                  The rest were scored — click <b>Run AI</b> again to fill in
+                  the remaining techniques.
                 </p>
               ) : null}
             </CardBody>

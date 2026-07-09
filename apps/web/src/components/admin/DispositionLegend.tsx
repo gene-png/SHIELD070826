@@ -39,21 +39,21 @@ export function DispositionLegend(): JSX.Element {
           <StatusPill tone="warning">Consolidate</StatusPill>
           <p className="max-w-prose">
             The tool <b>overlaps</b> with another tool that does the same job.
-            Rather than run both, fold this one into the tool you&apos;re keeping
-            — migrate its usage over, or merge the contracts/licenses so
+            Rather than run both, fold this one into the tool you&apos;re
+            keeping — migrate its usage over, or merge the contracts/licenses so
             you&apos;re not paying two vendors for one capability. Typically a{" "}
-            <b>phased change</b>, so the savings come from negotiation or a later
-            retirement, not immediately. Use this when a tool is worth keeping
-            but shouldn&apos;t exist <i>separately</i>.
+            <b>phased change</b>, so the savings come from negotiation or a
+            later retirement, not immediately. Use this when a tool is worth
+            keeping but shouldn&apos;t exist <i>separately</i>.
           </p>
         </div>
         <div className="flex items-start gap-3">
           <StatusPill tone="danger">Cut</StatusPill>
           <p className="max-w-prose">
-            The tool is <b>redundant, unused, or already replaced</b> — remove it
-            outright. Its full annual cost is counted as savings. Use this when
-            there&apos;s nothing to migrate, or a tool you&apos;re keeping already
-            covers it.
+            The tool is <b>redundant, unused, or already replaced</b> — remove
+            it outright. Its full annual cost is counted as savings. Use this
+            when there&apos;s nothing to migrate, or a tool you&apos;re keeping
+            already covers it.
           </p>
         </div>
         <p className="text-xs text-ink-tertiary">
