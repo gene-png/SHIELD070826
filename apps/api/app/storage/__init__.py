@@ -10,7 +10,7 @@ The backend is selected at startup from `Settings.s3_endpoint_url`:
   - "http(s)://..." → S3Storage hitting `Settings.s3_*` credentials.
 """
 
-from app.storage.base import StorageBackend, StoredObject
+from app.storage.base import StorageBackend, StorageUnavailable, StoredObject
 from app.storage.factory import get_storage
 
-__all__ = ["StorageBackend", "StoredObject", "get_storage"]
+__all__ = ["StorageBackend", "StorageUnavailable", "StoredObject", "get_storage"]

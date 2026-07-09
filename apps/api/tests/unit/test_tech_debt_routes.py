@@ -313,9 +313,11 @@ def test_latest_capability_list_admin_only(app_client) -> None:
     c.headers["X-Client-Id"] = client["user"]["client_id"]
     a_bearer = admin["tokens"]["access_token"]
     c_bearer = client["tokens"]["access_token"]
+    # C-5: an empty extraction from a non-empty input now raises (502), so seed
+    # a real item; this test only cares about the read-side admin/client ACL.
     provider.register(
         "extract.capabilities",
-        lambda _p: LLMResponse('{"items": []}'),
+        lambda _p: LLMResponse('{"items": [{"name": "Wiz"}]}'),
     )
 
     sr = c.post(
@@ -366,6 +368,62 @@ def test_extract_503_when_llm_returns_bad_json(app_client) -> None:
         json={"artifact_id": artifact_id},
     )
     assert r.status_code == 502
+
+
+@pytest.mark.unit
+def test_extract_empty_items_from_nonempty_input_502_no_list(app_client) -> None:
+    """C-5: a valid `{"items": []}` for a NON-EMPTY input must fail (502), not
+    mint an empty 'Draft, 0 items' CapabilityList with no failure signal."""
+    c, TestSession, provider = app_client
+    admin = register_admin(c, "admin@example.com")
+    bearer = admin["tokens"]["access_token"]
+    provider.register("extract.capabilities", lambda _p: LLMResponse('{"items": []}'))
+
+    sr = c.post(
+        "/tech-debt/services",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"title": "x"},
+    )
+    svc_id = sr.json()["id"]
+    artifact_id = _upload_csv(c, bearer, "x.csv", b"Tool\nWiz\n")
+
+    r = c.post(
+        f"/tech-debt/services/{svc_id}/capability-lists/extract",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"artifact_id": artifact_id},
+    )
+    assert r.status_code == 502, r.text
+    assert "no items" in r.json()["error"]["message"]
+    # No CapabilityList was minted for the failed extraction.
+    with TestSession() as db:
+        assert db.execute(select(CapabilityList)).all() == []
+
+
+@pytest.mark.unit
+def test_extract_wrong_shape_response_502_no_list(app_client) -> None:
+    """C-5: valid JSON of the wrong shape (a top-level list) must 502, not
+    silently yield zero items."""
+    c, TestSession, provider = app_client
+    admin = register_admin(c, "admin@example.com")
+    bearer = admin["tokens"]["access_token"]
+    provider.register("extract.capabilities", lambda _p: LLMResponse('[{"name": "Wiz"}]'))
+
+    sr = c.post(
+        "/tech-debt/services",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"title": "x"},
+    )
+    svc_id = sr.json()["id"]
+    artifact_id = _upload_csv(c, bearer, "x.csv", b"Tool\nWiz\n")
+
+    r = c.post(
+        f"/tech-debt/services/{svc_id}/capability-lists/extract",
+        headers={"Authorization": f"Bearer {bearer}"},
+        json={"artifact_id": artifact_id},
+    )
+    assert r.status_code == 502, r.text
+    with TestSession() as db:
+        assert db.execute(select(CapabilityList)).all() == []
 
 
 @pytest.mark.unit
@@ -471,12 +529,20 @@ def test_extract_corrupt_xlsx_422_not_500(app_client) -> None:
     )
     svc_id = sr.json()["id"]
 
-    # Upload garbage under the real .xlsx MIME (openpyxl -> BadZipFile).
+    # Upload garbage under the real .xlsx MIME (openpyxl -> BadZipFile). The
+    # bytes carry the ZIP magic ("PK\x03\x04") so they pass the C-6 upload
+    # content sniff, then still fail to open as a workbook at extraction time.
     xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     r = c.post(
         "/artifacts",
         headers={"Authorization": f"Bearer {bearer}"},
-        files={"file": ("broken.xlsx", io.BytesIO(b"this is not a real xlsx file"), xlsx_mime)},
+        files={
+            "file": (
+                "broken.xlsx",
+                io.BytesIO(b"PK\x03\x04this is not a real xlsx file"),
+                xlsx_mime,
+            )
+        },
     )
     assert r.status_code == 201, r.text
     artifact_id = r.json()["id"]

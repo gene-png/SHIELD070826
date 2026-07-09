@@ -153,6 +153,100 @@ def test_upload_rejects_legacy_xls_with_actionable_message(app_client) -> None:
 
 
 @pytest.mark.unit
+def test_upload_rejects_content_type_mismatch(app_client) -> None:
+    """C-6: sniff magic bytes server-side. An executable relabelled
+    application/pdf must be rejected with a typed 415, not stored as junk."""
+    client, _, _ = app_client
+    bearer = _bearer(client)
+    exe = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00"
+    r = client.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={"file": ("evil.pdf", io.BytesIO(exe), "application/pdf")},
+    )
+    assert r.status_code == 415, r.text
+    assert "does not match" in r.json()["error"]["message"]
+
+
+@pytest.mark.unit
+def test_upload_rejects_binary_relabelled_as_csv(app_client) -> None:
+    """C-6: binary garbage with NUL bytes relabelled text/csv is rejected."""
+    client, _, _ = app_client
+    bearer = _bearer(client)
+    r = client.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={"file": ("inv.csv", io.BytesIO(b"\x00\x01\x02\xff\xfebinary"), "text/csv")},
+    )
+    assert r.status_code == 415, r.text
+
+
+@pytest.mark.unit
+def test_upload_rejects_oversized_content_length_before_reading(app_client, monkeypatch) -> None:
+    """C-6: a declared-oversized upload is rejected up front (413) via the
+    Content-Length pre-check, before the body is buffered."""
+    import app.routes.artifacts as artifacts_module
+
+    monkeypatch.setattr(artifacts_module, "MAX_UPLOAD_BYTES", 8)
+    client, _, _ = app_client
+    bearer = _bearer(client)
+    r = client.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={"file": ("inv.csv", io.BytesIO(b"Tool,Cost\nWiz,1\n"), "text/csv")},
+    )
+    assert r.status_code == 413, r.text
+    # The pre-check path (not the post-read cap) produced this response.
+    assert "declares" in r.json()["error"]["message"]
+
+
+@pytest.mark.unit
+def test_download_reports_storage_outage_as_503(app_client) -> None:
+    """C-7: when the storage backend is down (StorageUnavailable), download
+    returns a retryable 503 - NOT a 410 that implies the file is gone."""
+    from app.routes.artifacts import _storage_dep
+    from app.storage.base import StorageUnavailable
+    from app.storage.local import LocalFilesystemStorage
+
+    client, _, storage_root = app_client
+
+    class _FlakyStorage:
+        def __init__(self, backend: LocalFilesystemStorage) -> None:
+            self._b = backend
+
+        def put(self, key, data, *, content_type):
+            return self._b.put(key, data, content_type=content_type)
+
+        def get(self, key):
+            raise StorageUnavailable("minio down")
+
+        def exists(self, key):
+            return self._b.exists(key)
+
+        def signed_url(self, key, *, ttl_seconds=600):
+            return self._b.signed_url(key, ttl_seconds=ttl_seconds)
+
+    flaky = _FlakyStorage(LocalFilesystemStorage(storage_root))
+    client.app.dependency_overrides[_storage_dep] = lambda: flaky
+
+    bearer = _bearer(client)
+    up = client.post(
+        "/artifacts",
+        headers={"Authorization": f"Bearer {bearer}"},
+        files={"file": ("inv.pdf", io.BytesIO(b"%PDF-1.7 ok"), "application/pdf")},
+    )
+    assert up.status_code == 201, up.text
+    artifact_id = up.json()["id"]
+
+    r = client.get(
+        f"/artifacts/{artifact_id}/download",
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    assert r.status_code == 503, r.text
+    assert "temporarily unreachable" in r.json()["error"]["message"]
+
+
+@pytest.mark.unit
 def test_upload_rejects_empty_file(app_client) -> None:
     client, _, _ = app_client
     bearer = _bearer(client)

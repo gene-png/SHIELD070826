@@ -205,9 +205,12 @@ def engine_db(tmp_path) -> Iterator[sessionmaker]:
 
 def _fixture_client() -> LLMClient:
     provider = FixtureProvider()
-    # One default fixture serves every job: "{}" parses to {} for the parse_json
-    # jobs and to [] for the tech-debt extract parser (no "items" key).
-    provider.register_static("default", LLMResponse("{}"))
+    # One default fixture serves every job: {"items": []} parses to a dict for
+    # the parse_json jobs and to [] for the tech-debt extract parser. (C-5: the
+    # extract parser now REJECTS a shapeless "{}" with no "items" key, so this
+    # test - which only cares about client_id attribution, not the parse result
+    # - feeds the documented empty shape instead.)
+    provider.register_static("default", LLMResponse('{"items": []}'))
     return LLMClient(provider)
 
 

@@ -16,6 +16,17 @@ class StoredObject:
     sha256: str
 
 
+class StorageUnavailable(RuntimeError):
+    """The storage service is temporarily unreachable (FIX C-7).
+
+    Distinct from ``FileNotFoundError``: a missing object is a permanent
+    404/410 ("your file is gone"), whereas a credential or connection
+    failure means the backend itself is down and the caller should get a
+    retryable 503 ("document storage is temporarily unreachable") instead
+    of being told the file is lost forever.
+    """
+
+
 def sha256_of(buf: bytes) -> str:
     return hashlib.sha256(buf).hexdigest()
 

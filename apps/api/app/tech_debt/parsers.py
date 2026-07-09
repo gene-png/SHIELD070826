@@ -8,6 +8,15 @@ the column-mapping; we just give it well-shaped rows.
 Phase 3 only supports CSV + XLSX. PDF ingest is a Phase 6 hardening
 target (table extraction is a different problem and the inventory
 documents Eugene's customers ship are reliably tabular).
+
+FIX C-3: previously only ``wb.active`` was parsed (garbage from a cover
+sheet), duplicate headers silently collapsed (dict-keyed rows, last
+column wins), and cells beyond the header width were dropped. We now
+scan ALL worksheets and pick the best candidate, uniquify duplicate
+headers (``name`` / ``name_2``), keep overflow cells under generated
+headers, and return sheet metadata so the caller can tell the admin
+which sheet was read, how many rows parsed / were skipped, and whether
+truncation occurred.
 """
 
 from __future__ import annotations
@@ -15,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -62,6 +72,23 @@ MAX_ROWS = 500
 SENTINEL_KEY = "__truncated__"
 
 
+@dataclass(frozen=True)
+class ParsedInventory:
+    """Parsed rows plus the metadata the caller reports back to the admin.
+
+    ``rows`` still carries the truncation sentinel as its last element when
+    the input exceeded MAX_ROWS, so ``data_rows`` / ``was_truncated`` keep
+    working on it unchanged (C-3 preserves that contract).
+    """
+
+    rows: list[dict[str, Any]]
+    sheet_name: str | None
+    sheet_count: int
+    rows_parsed: int
+    rows_skipped: int
+    truncated: bool
+
+
 def is_sentinel_row(row: Any) -> bool:
     """True for the internal truncation marker (see SENTINEL_KEY)."""
     return isinstance(row, dict) and SENTINEL_KEY in row
@@ -86,37 +113,116 @@ def kind_for_mime(mime_type: str) -> str:
         ) from exc
 
 
-def parse_inventory(data: bytes, mime_type: str) -> list[dict[str, Any]]:
-    """Parse `data` into a list of row-dicts. Header row becomes the keys.
+def _uniquify(names: list[str]) -> list[str]:
+    """Return `names` with duplicates disambiguated: `name`, `name_2`, ...
 
-    Returns at most MAX_ROWS rows; the last row in the response is a
-    sentinel `{"__truncated__": True}` marker when the input was longer.
+    Blank names become a generated `colN` first, so a header row with two
+    empty columns doesn't collapse either. Matches the "last column wins"
+    bug's inverse: every source column survives as its own key.
     """
-    kind = kind_for_mime(mime_type)
-    if kind == "csv":
-        rows = _parse_csv(data)
-    elif kind == "xlsx":
-        rows = _parse_xlsx(data)
-    else:
-        raise UnsupportedInventoryFormat(f"Unknown internal kind {kind!r}.")
-
-    out = list(rows)
-    truncated = len(out) > MAX_ROWS
-    if truncated:
-        out = out[:MAX_ROWS]
-        out.append({SENTINEL_KEY: True, "__hint__": f"Input had > {MAX_ROWS} rows."})
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for i, raw in enumerate(names):
+        base = raw.strip() if raw and raw.strip() else f"col{i + 1}"
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        out.append(base if count == 1 else f"{base}_{count}")
     return out
 
 
-def _parse_csv(data: bytes) -> Iterable[dict[str, Any]]:
+def _grid_to_rows(grid: list[list[str]]) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """Turn a 2-D string grid into row-dicts.
+
+    The first non-empty row is the header. Overflow cells (a data row wider
+    than the header) are kept under generated `colN` headers rather than
+    dropped. Returns (data_rows, skipped_count, header_names).
+    """
+    # Find the header: first row with any non-empty cell.
+    header_idx = None
+    for i, row in enumerate(grid):
+        if any(cell.strip() for cell in row):
+            header_idx = i
+            break
+    if header_idx is None:
+        return [], 0, []
+
+    header_cells = grid[header_idx]
+    body = grid[header_idx + 1 :]
+
+    # Effective width spans the header AND the widest data row so overflow
+    # cells survive under generated headers.
+    width = len(header_cells)
+    for row in body:
+        width = max(width, len(row))
+
+    raw_headers = [
+        header_cells[i] if i < len(header_cells) else f"col{i + 1}" for i in range(width)
+    ]
+    headers = _uniquify(raw_headers)
+
+    out: list[dict[str, Any]] = []
+    skipped = 0
+    for row in body:
+        if not any(cell.strip() for cell in row):
+            skipped += 1
+            continue
+        out.append({headers[i]: (row[i].strip() if i < len(row) else "") for i in range(width)})
+    return out, skipped, headers
+
+
+def _finalize(
+    all_rows: list[dict[str, Any]],
+    skipped: int,
+    *,
+    sheet_name: str | None,
+    sheet_count: int,
+) -> ParsedInventory:
+    truncated = len(all_rows) > MAX_ROWS
+    rows = all_rows[:MAX_ROWS] if truncated else list(all_rows)
+    parsed_count = len(rows)
+    if truncated:
+        rows.append({SENTINEL_KEY: True, "__hint__": f"Input had > {MAX_ROWS} rows."})
+    return ParsedInventory(
+        rows=rows,
+        sheet_name=sheet_name,
+        sheet_count=sheet_count,
+        rows_parsed=parsed_count,
+        rows_skipped=skipped,
+        truncated=truncated,
+    )
+
+
+def parse_inventory_detailed(data: bytes, mime_type: str) -> ParsedInventory:
+    """Parse `data` into rows plus sheet/row metadata (C-3).
+
+    ``.rows`` holds at most MAX_ROWS data rows, followed by a sentinel
+    ``{"__truncated__": True}`` marker when the input was longer.
+    """
+    kind = kind_for_mime(mime_type)
+    if kind == "csv":
+        return _parse_csv(data)
+    if kind == "xlsx":
+        return _parse_xlsx(data)
+    raise UnsupportedInventoryFormat(f"Unknown internal kind {kind!r}.")
+
+
+def parse_inventory(data: bytes, mime_type: str) -> list[dict[str, Any]]:
+    """Back-compat: parse `data` into a list of row-dicts (with sentinel).
+
+    Prefer ``parse_inventory_detailed`` when you need the sheet/row metadata.
+    """
+    return parse_inventory_detailed(data, mime_type).rows
+
+
+def _parse_csv(data: bytes) -> ParsedInventory:
     text = data.decode("utf-8-sig", errors="replace")
-    reader = csv.DictReader(io.StringIO(text))
-    for row in reader:
-        # Strip whitespace from keys + values for stability.
-        yield {(k or "").strip(): (v or "").strip() for k, v in row.items() if k is not None}
+    reader = csv.reader(io.StringIO(text))
+    grid = [["" if cell is None else str(cell) for cell in row] for row in reader]
+    rows, skipped, _ = _grid_to_rows(grid)
+    return _finalize(rows, skipped, sheet_name=None, sheet_count=1)
 
 
-def _parse_xlsx(data: bytes) -> Iterable[dict[str, Any]]:
+def _parse_xlsx(data: bytes) -> ParsedInventory:
     # openpyxl is lazy-imported so test runs that don't touch XLSX don't
     # pay the import cost.
     from zipfile import BadZipFile
@@ -134,20 +240,28 @@ def _parse_xlsx(data: bytes) -> Iterable[dict[str, Any]]:
             "This file could not be read as a valid .xlsx workbook. "
             "Re-save it as .xlsx and upload again."
         ) from exc
-    ws = wb.active
-    if ws is None:
-        return
-    rows_iter = ws.iter_rows(values_only=True)
-    try:
-        header = next(rows_iter)
-    except StopIteration:
-        return
-    headers = [str(h).strip() if h is not None else f"col{i}" for i, h in enumerate(header)]
-    for raw in rows_iter:
-        if raw is None or all(v is None or str(v).strip() == "" for v in raw):
-            continue
-        yield {
-            headers[i]: ("" if v is None else str(v).strip())
-            for i, v in enumerate(raw)
-            if i < len(headers)
-        }
+
+    sheet_names = list(wb.sheetnames)
+    sheet_count = len(sheet_names)
+
+    # FIX C-3: scan EVERY worksheet and pick the best candidate (most data
+    # rows under a plausible header) instead of blindly taking wb.active,
+    # which extracts garbage from a workbook that opens on a cover page.
+    best: tuple[list[dict[str, Any]], int, str] | None = None
+    for name in sheet_names:
+        ws = wb[name]
+        grid: list[list[str]] = []
+        for raw in ws.iter_rows(values_only=True):
+            if raw is None:
+                grid.append([])
+                continue
+            grid.append(["" if v is None else str(v).strip() for v in raw])
+        rows, skipped, _ = _grid_to_rows(grid)
+        if best is None or len(rows) > len(best[0]):
+            best = (rows, skipped, name)
+
+    if best is None:
+        return _finalize([], 0, sheet_name=None, sheet_count=sheet_count)
+
+    rows, skipped, sheet_name = best
+    return _finalize(rows, skipped, sheet_name=sheet_name, sheet_count=sheet_count)

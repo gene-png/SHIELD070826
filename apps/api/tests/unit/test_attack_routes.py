@@ -172,15 +172,24 @@ def test_create_assessment_seeds_full_catalog_unscored(app_client) -> None:
 
 
 @pytest.mark.unit
-def test_create_assessment_increments_version(app_client) -> None:
+def test_create_assessment_idempotent_until_approved(app_client) -> None:
+    # FIX E-3: the open-draft guard makes create idempotent — a second click
+    # returns the SAME open draft (not 600+ fresh rows / a new version). A new
+    # version is minted only after the current draft is approved.
     c = app_client
     admin = register_admin(c, "admin@example.com")
     bearer = admin["tokens"]["access_token"]
+    h = {"Authorization": f"Bearer {bearer}"}
     svc_id = _open_service(c, bearer)
     v1 = _new_assessment(c, bearer, svc_id)
-    v2 = _new_assessment(c, bearer, svc_id)
+    v1_again = _new_assessment(c, bearer, svc_id)
     assert v1["version"] == 1
+    assert v1_again["version"] == 1
+    assert v1["id"] == v1_again["id"]
+    assert c.post(f"/attack/assessments/{v1['id']}/approve", headers=h).status_code == 200
+    v2 = _new_assessment(c, bearer, svc_id)
     assert v2["version"] == 2
+    assert v2["id"] != v1["id"]
 
 
 # ---------------------------------------------------------------------------

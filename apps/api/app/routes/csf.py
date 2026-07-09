@@ -57,6 +57,7 @@ from app.csf.playbook import (
     weighted_floor_rollup,
 )
 from app.csf.scoring import compute as compute_score
+from app.db.locks import RunInProgressError, run_lock
 from app.db.session import get_db
 from app.dependencies import current_client, current_user, require_role
 from app.models._common import utcnow
@@ -110,6 +111,7 @@ from app.tech_debt.filename import (
     deliverable_filename,
 )
 from app.tenant import (
+    require_artifact_in_tenant,
     require_csf_assessment_in_tenant,
     require_service_in_tenant,
 )
@@ -356,11 +358,25 @@ def create_assessment(
     db: Annotated[Session, Depends(get_db)],
 ) -> CsfAssessmentResponse:
     svc = require_service_in_tenant(db, service_id, client.id, kind=ServiceKind.NIST_CSF)
+    # FIX E-3: open-draft guard. If a draft already exists, return it instead of
+    # minting a fresh version — a double-click / two tabs must not create a
+    # second v1 (or supersede the working draft with an empty one). NB: CSF did
+    # NOT already have this guard; it minted prior.version + 1 unconditionally.
+    assessment, _created = _get_or_create_draft(db, svc, client.id, user.id)
+    db.commit()
+    db.refresh(assessment)
+    return _serialize_assessment(db, assessment)
+
+
+def _create_draft_assessment(
+    db: Session, svc: Service, client_id: uuid.UUID, user_id: uuid.UUID
+) -> CsfAssessment:
+    """Mint a new draft assessment + its empty answer grid (no commit)."""
     prior = _latest_assessment(db, svc.id)
     version = (prior.version + 1) if prior else 1
     assessment = CsfAssessment(
         service_id=svc.id,
-        client_id=client.id,
+        client_id=client_id,
         version=version,
         status=CsfAssessmentStatus.DRAFT,
     )
@@ -372,7 +388,7 @@ def create_assessment(
         db.add(
             CsfAnswer(
                 assessment_id=assessment.id,
-                client_id=client.id,
+                client_id=client_id,
                 subcategory_code=sc.code,
             )
         )
@@ -381,12 +397,25 @@ def create_assessment(
         action="csf.assessment.created",
         target_type="csf_assessment",
         target_id=assessment.id,
-        actor_user_id=user.id,
+        actor_user_id=user_id,
         details={"service_id": str(svc.id), "version": version},
     )
-    db.commit()
-    db.refresh(assessment)
-    return _serialize_assessment(db, assessment)
+    return assessment
+
+
+def _get_or_create_draft(
+    db: Session, svc: Service, client_id: uuid.UUID, user_id: uuid.UUID
+) -> tuple[CsfAssessment, bool]:
+    """Return the current open draft (idempotent), else mint a new one.
+
+    ``bool`` is True when a new draft was created. Only DRAFT counts as "open";
+    a submitted/approved/released latest means the next create legitimately
+    mints a fresh version.
+    """
+    prior = _latest_assessment(db, svc.id)
+    if prior is not None and prior.status == CsfAssessmentStatus.DRAFT:
+        return prior, False
+    return _create_draft_assessment(db, svc, client_id, user_id), True
 
 
 @router.get(
@@ -471,7 +500,14 @@ def patch_answer(
     if "notes" in data:
         row.notes = data["notes"]
     if "evidence_artifact_id" in data:
-        row.evidence_artifact_id = data["evidence_artifact_id"]
+        aid = data["evidence_artifact_id"]
+        # FIX C-8: validate the evidence link. An unchecked assignment accepted a
+        # cross-tenant artifact id (then leaked it back) and 500'd on a
+        # nonexistent id. Route it through the tenant check: 404 on missing or
+        # cross-tenant (the platform's no-oracle convention).
+        if aid is not None:
+            require_artifact_in_tenant(db, aid, client.id)
+        row.evidence_artifact_id = aid
     if data.get("locked") is not None:
         row.locked = bool(data["locked"])
     row.answered_by = user.id
@@ -772,6 +808,51 @@ def gap_analysis(
 
 _VALID_TIERS = {t.value for t in Tier}
 
+# FIX F-1: auto-seed default. The client's impact profile (set at intake) picks
+# the tier to seed lazily on first Run AI; HIGH is the safe fallback (the most
+# complete profile). Seeding NEVER stamps scored_at, so B-3's export gate keeps
+# blocking until a real score (a human patch or a Run-AI pass) lands.
+_PROFILE_TO_SEED_TIER = {"LOW": "low", "MOD": "moderate", "HIGH": "high"}
+
+
+def _default_seed_tiers(db: Session, service_id: uuid.UUID) -> list[str]:
+    profile = (_client_profile(db, service_id) or "").upper()
+    return [_PROFILE_TO_SEED_TIER.get(profile, "high")]
+
+
+def _seed_working_profile(
+    db: Session, a: CsfAssessment, client_id: uuid.UUID, tiers: list[str]
+) -> int:
+    """Create the (tier, subcategory) dimension-score rows that don't yet exist.
+
+    Idempotent (skips existing pairs) and deliberately leaves ``scored_at`` NULL
+    so the B-3 export gate still counts every row as unscored. Returns how many
+    rows were created.
+    """
+    existing = {
+        (r.tier, r.subcategory_code)
+        for r in db.execute(
+            select(CsfDimensionScore.tier, CsfDimensionScore.subcategory_code).where(
+                CsfDimensionScore.assessment_id == a.id
+            )
+        ).all()
+    }
+    created = 0
+    for tier in tiers:
+        for sc in SUBCATEGORIES:
+            if (tier, sc.code) in existing:
+                continue
+            db.add(
+                CsfDimensionScore(
+                    assessment_id=a.id,
+                    client_id=client_id,
+                    tier=tier,
+                    subcategory_code=sc.code,
+                )
+            )
+            created += 1
+    return created
+
 
 def _dims(row: CsfDimensionScore) -> DimensionScores:
     return DimensionScores(
@@ -830,28 +911,7 @@ def seed_profiles(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No valid tiers (high/moderate/low).",
         )
-    existing = {
-        (r.tier, r.subcategory_code)
-        for r in db.execute(
-            select(CsfDimensionScore.tier, CsfDimensionScore.subcategory_code).where(
-                CsfDimensionScore.assessment_id == a.id
-            )
-        ).all()
-    }
-    created = 0
-    for tier in tiers:
-        for sc in SUBCATEGORIES:
-            if (tier, sc.code) in existing:
-                continue
-            db.add(
-                CsfDimensionScore(
-                    assessment_id=a.id,
-                    client_id=client.id,
-                    tier=tier,
-                    subcategory_code=sc.code,
-                )
-            )
-            created += 1
+    created = _seed_working_profile(db, a, client.id, tiers)
     audit(
         db,
         action="csf.profiles_seeded",
@@ -1050,6 +1110,26 @@ def run_ai(
     Returns a 'what changed' list.
     """
     svc = require_service_in_tenant(db, service_id, client.id, kind=ServiceKind.NIST_CSF)
+    # FIX E-3: hold the per-service run lock across the whole read-modify-write
+    # (including the auto-seed + the provider call). It survives the db.rollback()
+    # E-1 does before the provider call — see app/db/locks.py.
+    try:
+        with run_lock(db, "csf_run_ai", svc.id):
+            return _csf_run_ai_locked(svc, user, client, db, llm)
+    except RunInProgressError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A Run AI is already in progress for this assessment.",
+        ) from exc
+
+
+def _csf_run_ai_locked(
+    svc: Service,
+    user: User,
+    client: Client,
+    db: Session,
+    llm: LLMClient,
+) -> CsfRunAiResponse:
     a = _latest_assessment(db, svc.id)
     if a is None:
         raise HTTPException(
@@ -1068,10 +1148,20 @@ def run_ai(
         .all()
     }
     if not rows:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Seed the Working Profile before running AI.",
-        )
+        # FIX F-1: auto-seed the Working Profile lazily instead of 409'ing. The
+        # manual seed endpoint stays for re-seeding after catalog changes. Seeding
+        # leaves scored_at NULL, so B-3's export gate still blocks (verified in
+        # tests). Commit the seeded rows so they survive the E-1 rollback below.
+        _seed_working_profile(db, a, client.id, _default_seed_tiers(db, svc.id))
+        db.commit()
+        rows = {
+            f"{r.tier}|{r.subcategory_code}": r
+            for r in db.execute(
+                select(CsfDimensionScore).where(CsfDimensionScore.assessment_id == a.id)
+            )
+            .scalars()
+            .all()
+        }
     locked_keys = frozenset(k for k, r in rows.items() if r.locked)
 
     def _snap() -> dict[str, dict]:

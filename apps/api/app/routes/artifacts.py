@@ -16,7 +16,7 @@ import re
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,7 +28,7 @@ from app.models.artifact import Artifact, ArtifactOrigin
 from app.models.client import Client
 from app.models.user import User, UserRole
 from app.schemas.artifact import ArtifactListResponse, ArtifactResponse
-from app.storage import StorageBackend, get_storage
+from app.storage import StorageBackend, StorageUnavailable, get_storage
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -53,6 +53,83 @@ ALLOWED_MIME = {
 # an actionable message instead of silently accepting a file we can't parse.
 LEGACY_XLS_MIME = "application/vnd.ms-excel"
 
+# Read the upload body in bounded chunks so an oversized file dies at the cap
+# instead of ballooning worker memory (FIX C-6).
+_UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MB
+
+# ZIP-container Office/archive formats. All begin with a local-file-header
+# ("PK\x03\x04"); an empty/spanned archive uses PK\x05\x06 / PK\x07\x08.
+_ZIP_BASED_MIME = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/zip",
+}
+
+
+def _looks_like_utf8_text(data: bytes) -> bool:
+    """UTF-8 text heuristic for csv/txt (FIX C-6).
+
+    Binary garbage relabelled ``text/csv`` almost always carries NUL bytes and
+    fails to decode as UTF-8; real inventory exports are ASCII/UTF-8 (a leading
+    UTF-8 BOM is fine). We reject on a NUL byte or an undecodable body.
+    """
+    if b"\x00" in data[:8192]:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _content_matches_mime(mime: str, data: bytes) -> bool:
+    """Server-side magic-byte sniff: does the CONTENT match the claimed MIME?
+
+    Defends against a client that relabels binary garbage as an allowed type
+    (FIX C-6). Unknown MIMEs return False, but ALLOWED_MIME is enforced first
+    so this only ever runs for a type we otherwise accept.
+    """
+    head = data[:16]
+    if mime == "application/pdf":
+        return head.startswith(b"%PDF")
+    if mime in _ZIP_BASED_MIME:
+        return (
+            head.startswith(b"PK\x03\x04")
+            or head.startswith(b"PK\x05\x06")
+            or head.startswith(b"PK\x07\x08")
+        )
+    if mime == "application/msword":  # legacy OLE2 .doc
+        return head.startswith(b"\xd0\xcf\x11\xe0")
+    if mime == "image/png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return head.startswith(b"\xff\xd8\xff")
+    if mime in ("text/csv", "text/plain"):
+        return _looks_like_utf8_text(data)
+    return False
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Stream the upload in chunks, aborting once it exceeds `cap` (FIX C-6).
+
+    Reading incrementally means a 5 GB upload dies after `cap`+one chunk of
+    memory instead of being fully buffered before the size check.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds the {cap} byte upload limit.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 def _safe_title(name: str) -> str:
     """Strip path separators and limit length so a malicious filename can't
@@ -73,6 +150,7 @@ def _storage_dep() -> StorageBackend:
     summary="Upload an artifact (intake document)",
 )
 async def upload_artifact(
+    request: Request,
     file: Annotated[UploadFile, File(description="Document to upload")],
     user: Annotated[User, Depends(current_user)],
     client: Annotated[Client, Depends(current_client)],
@@ -92,16 +170,42 @@ async def upload_artifact(
             detail=f"MIME type {mime!r} is not allowed for intake uploads.",
         )
 
-    data = await file.read()
+    # FIX C-6: reject a declared-oversized upload BEFORE reading a single byte.
+    # Content-Length is the whole multipart envelope (slightly larger than the
+    # file); the incremental cap below is the authoritative per-file check.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_len = int(declared)
+        except ValueError:
+            declared_len = -1
+        if declared_len > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Upload declares {declared_len} bytes, over the "
+                    f"{MAX_UPLOAD_BYTES} byte limit."
+                ),
+            )
+
+    # FIX C-6: stream with an incremental cap so an oversized body dies early.
+    data = await _read_capped(file, MAX_UPLOAD_BYTES)
     if len(data) == 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Uploaded file is empty.",
         )
-    if len(data) > MAX_UPLOAD_BYTES:
+
+    # FIX C-6: verify the CONTENT, not the client's content-type claim. Binary
+    # garbage relabelled text/csv (or an exe labelled application/pdf) is junk
+    # for the LLM and a storage-poisoning vector, so reject the mismatch.
+    if not _content_matches_mime(mime, data):
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds the {MAX_UPLOAD_BYTES} byte upload limit.",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=(
+                f"File content does not match its declared type {mime!r}. "
+                "The upload may be corrupt or mislabeled."
+            ),
         )
 
     title = _safe_title(file.filename or "upload")
@@ -225,6 +329,13 @@ def download_artifact(
             status_code=status.HTTP_410_GONE,
             detail="Artifact bytes no longer available.",
         ) from exc
+    except StorageUnavailable as exc:
+        # FIX C-7: the backend is down, not the object. Don't mislead the user
+        # into thinking their file is gone; return a retryable 503.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="document storage is temporarily unreachable",
+        ) from exc
     return Response(
         content=data,
         media_type=row.mime_type,
@@ -268,6 +379,12 @@ def view_artifact(
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="Artifact bytes no longer available.",
+        ) from exc
+    except StorageUnavailable as exc:
+        # FIX C-7: storage outage -> retryable 503, not a "file gone" 410.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="document storage is temporarily unreachable",
         ) from exc
     # Lock down what the inline document can do: the dashboard is fully
     # self-contained (no scripts, no external assets), so a strict CSP costs

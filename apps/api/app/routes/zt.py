@@ -31,6 +31,7 @@ from app.ai.diff import diff_keyed_rows
 from app.ai.engine import run_job
 from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
+from app.db.locks import RunInProgressError, run_lock
 from app.db.session import get_db
 from app.dependencies import current_client, current_user, require_role
 from app.models._common import utcnow
@@ -77,6 +78,7 @@ from app.tech_debt.filename import (
     deliverable_filename,
 )
 from app.tenant import (
+    require_artifact_in_tenant,
     require_service_in_tenant,
     require_zt_assessment_in_tenant,
 )
@@ -395,11 +397,35 @@ def run_ai(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Zero Trust service not found."
         )
-    a = _latest_assessment(db, svc.id)
-    if a is None:
+    # FIX E-3: hold the per-service run lock across auto-create + read-modify-write
+    # + the provider call. Survives the db.rollback() E-1 does (see app/db/locks.py).
+    try:
+        with run_lock(db, "zt_run_ai", svc.id):
+            return _zt_run_ai_locked(svc, user, client, db, llm)
+    except RunInProgressError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Create an assessment first."
-        )
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A Run AI is already in progress for this assessment.",
+        ) from exc
+
+
+def _zt_run_ai_locked(
+    svc: Service,
+    user: User,
+    client: Client,
+    db: Session,
+    llm: LLMClient,
+) -> ZtRunAiResponse:
+    # FIX F-2: create the draft (seeding rows) on first Run AI when none exists,
+    # exactly what "Start assessment" does — the manual Start button still works.
+    # The open-draft guard (E-3) makes this idempotent, so a re-run does not mint
+    # a second version.
+    a, created = _get_or_create_draft(db, svc, client.id, user.id)
+    if created:
+        # Persist the fresh draft + rows BEFORE the E-1 rollback below, which
+        # would otherwise discard them.
+        db.commit()
+        db.refresh(a)
     if a.status in (ZtAssessmentStatus.APPROVED, ZtAssessmentStatus.RELEASED):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This assessment is locked."
@@ -538,14 +564,25 @@ def create_assessment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Zero Trust service not found.",
         )
+    # FIX E-3: open-draft guard — a double-click returns the existing draft
+    # instead of minting a fresh version.
+    assessment, _created = _get_or_create_draft(db, svc, client.id, user.id)
+    db.commit()
+    db.refresh(assessment)
+    return _serialize_assessment(db, assessment)
+
+
+def _create_draft_assessment(
+    db: Session, svc: Service, client_id: uuid.UUID, user_id: uuid.UUID
+) -> ZtAssessment:
+    """Mint a new draft ZT assessment + its per-capability answer grid (no commit)."""
     framework = _framework_for_kind(svc.kind)
     cat_fw = _to_catalog_framework(framework)
-
     prior = _latest_assessment(db, svc.id)
     version = (prior.version + 1) if prior else 1
     assessment = ZtAssessment(
         service_id=svc.id,
-        client_id=client.id,
+        client_id=client_id,
         framework=framework,
         version=version,
         status=ZtAssessmentStatus.DRAFT,
@@ -556,7 +593,7 @@ def create_assessment(
         db.add(
             ZtAnswer(
                 assessment_id=assessment.id,
-                client_id=client.id,
+                client_id=client_id,
                 capability_code=cap.code,
             )
         )
@@ -565,16 +602,28 @@ def create_assessment(
         action="zt.assessment.created",
         target_type="zt_assessment",
         target_id=assessment.id,
-        actor_user_id=user.id,
+        actor_user_id=user_id,
         details={
             "service_id": str(svc.id),
             "version": version,
             "framework": framework.value,
         },
     )
-    db.commit()
-    db.refresh(assessment)
-    return _serialize_assessment(db, assessment)
+    return assessment
+
+
+def _get_or_create_draft(
+    db: Session, svc: Service, client_id: uuid.UUID, user_id: uuid.UUID
+) -> tuple[ZtAssessment, bool]:
+    """Return the current open draft (idempotent), else mint a new one.
+
+    ``bool`` is True when a new draft was created. Only DRAFT is "open"; a
+    submitted/approved/released latest means the next create mints a new version.
+    """
+    prior = _latest_assessment(db, svc.id)
+    if prior is not None and prior.status == ZtAssessmentStatus.DRAFT:
+        return prior, False
+    return _create_draft_assessment(db, svc, client_id, user_id), True
 
 
 @router.get(
@@ -667,7 +716,12 @@ def patch_answer(
     if "notes" in data:
         row.notes = data["notes"]
     if "evidence_artifact_id" in data:
-        row.evidence_artifact_id = data["evidence_artifact_id"]
+        aid = data["evidence_artifact_id"]
+        # FIX C-8: validate the evidence link — 404 on a missing or cross-tenant
+        # artifact id (no-oracle), instead of leaking it back / 500'ing.
+        if aid is not None:
+            require_artifact_in_tenant(db, aid, client.id)
+        row.evidence_artifact_id = aid
     if data.get("locked") is not None:
         row.locked = bool(data["locked"])
     row.answered_by = user.id

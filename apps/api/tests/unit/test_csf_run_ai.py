@@ -215,7 +215,10 @@ def test_csf_run_ai_one_bad_chunk_applies_nothing(app_client) -> None:
 
 
 @pytest.mark.unit
-def test_csf_run_ai_requires_seeded_profile(app_client) -> None:
+def test_csf_run_ai_auto_seeds_when_unseeded(app_client) -> None:
+    # FIX F-1: run-ai on a fresh, unseeded assessment auto-seeds the Working
+    # Profile and succeeds (was a 409 "Seed the Working Profile before running
+    # AI"). The seed endpoint remains for re-seeding after catalog changes.
     c, provider = app_client
     r = register_admin_resp(c, "admin@example.com")
     h = {"Authorization": f"Bearer {r.json()['tokens']['access_token']}"}
@@ -224,5 +227,7 @@ def test_csf_run_ai_requires_seeded_profile(app_client) -> None:
     ]
     c.post(f"/csf/services/{svc_id}/assessments", headers=h)
     provider.register_static("csf_score", LLMResponse('{"scores": []}'))
-    # No profile seeded -> 409.
-    assert c.post(f"/csf/services/{svc_id}/run-ai", headers=h).status_code == 409
+    # No profile seeded, yet run-ai succeeds (auto-seed) and returns a full grid.
+    resp = c.post(f"/csf/services/{svc_id}/run-ai", headers=h)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["rows"]  # rows were seeded lazily

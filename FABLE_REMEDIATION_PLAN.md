@@ -289,6 +289,67 @@ Sprints are small, sequenced by dependency and client-facing risk. **One sprint 
 | **Risks**      | **E-1's session split** changes transaction boundaries around every AI call — highest regression risk in the sprint; gate on the full 480-test suite plus new concurrency tests. **E-3's advisory lock** must degrade to a no-op on SQLite (the test DB). **H-2 rate limiting** could trip the e2e suite — set limits from config and keep e2e under threshold.                                                                                                                                                                                                                                                                                                                                                             |
 | **Acceptance** | Provider stub that sleeps past the timeout → typed **504**, no state change. Provider raises → request 500s, **and a fresh session still finds the `FAILED` `llm_calls` row**. Two concurrent run-ai calls → one 200, one typed **409**. `prod + fixture + no SHIELD_DEMO` → **refuses to boot**; `prod + fixture + SHIELD_DEMO=1` → boots. 10 rapid logins from one IP → **429 + Retry-After**. Multi-sheet, `$`-formatted xlsx extracts with costs intact and reports the sheet used. Playwright: client submits → admin replies → client clicks **from My Assessments** into the thread and reads it (no `page.goto`). Playwright: fresh admin session picks a client **via the UI switcher** and reaches Risk Register. |
 
+### Sprint 2 — Solid Operations — STEP 2 ✅ PASS (8 more fixes; A-6, C-3–C-8, E-3, F-1, F-2, C-8)
+
+**Executed 2026-07-09.** Closes everything in Sprint 2 except E-4 and H-6.
+
+**Subagents.** Two Opus agents on disjoint files (extraction/storage vs. routes/concurrency), plus the lead writing A-6 and repairing one cross-fix regression.
+
+**Tests (quiescent tree).**
+
+| Command                                    | Result                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `python -m pytest`                         | **581 passed, 8 skipped, 0 failed**, EXIT=0 (baseline 520 → +61 tests)                                 |
+| `ruff check app tests` / `black --check`   | clean, 181 files                                                                                       |
+| `bandit -c pyproject.toml -r app`          | **High: 0**; Mediums dropped 2 → 1                                                                     |
+| `alembic upgrade → downgrade -1 → upgrade` | `0031` reversible                                                                                      |
+| Unique constraint, verified functionally   | SQLite DDL shows `UNIQUE (client_id, version)`; real Postgres shows `uq_risk_registers_client_version` |
+| `tsc --noEmit` (web)                       | zero errors                                                                                            |
+| `prettier --check` (changed web files)     | clean                                                                                                  |
+| Playwright smoke vs rebuilt stack          | **3 passed, EXIT=0**                                                                                   |
+
+**A-6 — the contract tests, and proof they work.** This is the single highest-leverage fix in the plan: it is what would have caught the four live-mode breaks that shipped against a green suite. The tests import the shapes from `app/ai/schemas.py`, the field tuples from the routes (`_RUN_FIELDS`, `_DIM_FIELDS`), and the enum members from `app/risk/engine.py` — nothing is restated, so prompt and parser cannot drift without a test going red.
+
+I proved they catch the _original_ defects by restoring each one:
+
+- Restoring the pre-Sprint-1 CSF shape (`{"subcategories": [{"code": ...}]}`) →
+  `AssertionError: route reads data['scores']`
+- Restoring the risk prompt's display labels →
+  `AssertionError: 'very_low' is a valid enum token but the prompt never offers it`
+
+`test_every_registered_job_has_a_declared_shape` additionally prevents a _new_ job from shipping without a shape and drifting on day one.
+
+**A cross-fix regression the tests could not see — caught and fixed by the lead.**
+
+E-1 removed the pooled DB connection the synchronous AI call used to hold. E-3 then added a per-entity advisory lock held for the whole request, implemented as `db.get_bind().connect()` — which checks a connection out of **that very pool** and holds it across the provider call. On Postgres this silently reinstated the starvation E-1 had just removed.
+
+It was invisible: the suite runs on SQLite, which takes the in-process-mutex branch and never opens a lock connection, so `test_pooled_connection_released_across_provider_call` stayed green while production would have held a connection per in-flight run. **A green test proving an invariant that does not hold in production is the exact pathology this remediation exists to eliminate.**
+
+Fix: the lock now uses a dedicated `NullPool` engine (`app/db/locks.py::lock_engine`), so it opens a private connection and never competes with the pool serving every other endpoint. `tests/unit/test_e3_lock_pool.py` pins the invariant; reverting to `bind.connect()` yields:
+
+```
+AssertionError: run_lock called bind.connect() -- that borrows from the request pool
+```
+
+Credit where due: the subagent's _reasoning_ was excellent and unprompted. It independently rejected `pg_advisory_xact_lock` and `SELECT ... FOR UPDATE` because both are transaction-scoped and would be released by E-1's `db.rollback()`. The flaw was one line inside otherwise careful work.
+
+**Findings that again contradict the remediation document.**
+
+1. **E-3.** The document says to "copy the open-draft guard CSF already has." CSF has no such guard — `create_assessment` did `prior version + 1` unconditionally, exactly like ZT and ATT&CK. All three needed it **built**. (Third documented case where following the document verbatim would have produced a wrong edit.)
+2. **C-3.** `tech_debt/parsers.py` really did have **zero** direct tests. `tests/unit/test_tech_debt_parsers.py` now exists.
+
+**Fixes landed.** A-6 (contract tests); C-3 (multi-sheet + best-candidate selection, duplicate headers uniquified, overflow cells kept); C-4 (tolerant money/count parsing, unparseable values preserved into notes, `confidence_pct` clamped); C-5 (wrong-shape responses raise instead of minting an empty version); C-6 (magic-byte sniffing, `Content-Length` checked before buffering, in the API and the Next proxy); C-7 (`urllib` side-channel replaced with the backend's own `get()` plus timeouts; `StorageUnavailable` → typed 503 so an outage stops reading as permanent data loss); C-8 (evidence links routed through `require_artifact_in_tenant`); E-3 (advisory lock, unique constraint, open-draft guard in all three services); F-1 (CSF auto-seeds without setting `scored_at`, so B-3's export gate still holds — verified by test); F-2 (ATT&CK/ZT auto-create the draft on first Run AI).
+
+**Pass/fail: PASS.**
+
+**Remaining in Sprint 2: E-4 and H-6.**
+
+**Follow-ups.**
+
+1. `_MISSING_KEY_CODES` in `app/storage/s3.py` includes `NoSuchBucket`, which maps to a 410 ("your file is gone"). A missing _bucket_ is misconfiguration, not a lost object — arguably the same confusion C-7 exists to remove. One-line judgment call; flagged rather than changed under another agent's scope.
+2. The sha256 upload-dedup half of C-8 remains unimplemented (it lives in `routes/artifacts.py`, which was owned by the other agent during Step 2).
+3. Both subagents stalled on background waiters and were stopped by the lead after their work was complete; every claim was then verified directly rather than resumed.
+
 ### Sprint 3 — Complete Deliverables and Truth
 
 |                |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -538,7 +599,7 @@ Reverting the line that _looks like_ the fix is not the same as reverting the fi
 
 **Pass/fail: PASS for Step 1.**
 
-**Remaining in Sprint 2 (10 fixes):** A-6 (contract tests), C-3–C-8, E-3, E-4, F-1, F-2, H-6.
+**Remaining in Sprint 2 after Step 1 (10 fixes):** A-6, C-3–C-8, E-3, E-4, F-1, F-2, H-6. Step 2 (below) closed all but E-4 and H-6.
 
 **Follow-ups / new findings.**
 

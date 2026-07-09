@@ -21,6 +21,7 @@ from app.ai.engine import run_job
 from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.attack.catalog import all_codes as attack_all_codes
 from app.audit import audit
+from app.db.locks import RunInProgressError, run_lock
 from app.db.session import get_db
 from app.dependencies import require_role
 from app.docx_export import DOCX_MIME
@@ -236,6 +237,27 @@ def generate(
     llm: Annotated[LLMClient, Depends(_llm_dep)],
 ) -> RiskRegisterGenerateResponse:
     client = _require_client(db, cid)
+    # FIX E-3: serialize concurrent generates for this client so a double-click
+    # cannot mint two registers with the same version. The lock survives the
+    # db.rollback() below (see app/db/locks.py); the unique constraint on
+    # (client_id, version) is the DB-level backstop.
+    try:
+        with run_lock(db, "risk_generate", cid):
+            return _generate_locked(db, llm, client, cid, admin)
+    except RunInProgressError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A Risk Register generation is already in progress for this client.",
+        ) from exc
+
+
+def _generate_locked(
+    db: Session,
+    llm: LLMClient,
+    client: Client,
+    cid: uuid.UUID,
+    admin: User,
+) -> RiskRegisterGenerateResponse:
     g = _gate(db, cid)
     if not g.unlocked:
         raise HTTPException(

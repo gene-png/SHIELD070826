@@ -12,7 +12,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +32,12 @@ _JSON_LIST = JSON().with_variant(JSONB, "postgresql")
 
 class RiskRegister(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "risk_registers"
+    # FIX E-3: a concurrent double-click on "generate" must not create two
+    # registers with the same version (which would corrupt the supersession
+    # chain). Mirrors uq_zt_assessments_service_version / the ATT&CK equivalent.
+    __table_args__ = (
+        UniqueConstraint("client_id", "version", name="uq_risk_registers_client_version"),
+    )
 
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("client.id", ondelete="CASCADE"), nullable=False, index=True

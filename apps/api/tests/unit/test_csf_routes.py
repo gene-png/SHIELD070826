@@ -155,16 +155,25 @@ def test_create_assessment_seeds_106_empty_answers(app_client) -> None:
 
 
 @pytest.mark.unit
-def test_create_assessment_increments_version(app_client) -> None:
+def test_create_assessment_idempotent_until_approved(app_client) -> None:
+    # FIX E-3: the open-draft guard makes create idempotent — a second click
+    # returns the SAME open draft (v1), not a fresh v2. A new version is minted
+    # only once the current draft is approved (no longer "open").
     c = app_client
     admin = register_admin(c, "admin@example.com")
     bearer = admin["tokens"]["access_token"]
+    h = {"Authorization": f"Bearer {bearer}"}
     svc_id = _open_service(c, bearer)
     v1 = _new_assessment(c, bearer, svc_id)
-    v2 = _new_assessment(c, bearer, svc_id)
+    v1_again = _new_assessment(c, bearer, svc_id)
     assert v1["version"] == 1
+    assert v1_again["version"] == 1
+    assert v1["id"] == v1_again["id"]  # same draft, no double-mint
+    # Approve v1, then a create legitimately mints v2.
+    assert c.post(f"/csf/assessments/{v1['id']}/approve", headers=h).status_code == 200
+    v2 = _new_assessment(c, bearer, svc_id)
     assert v2["version"] == 2
-    assert v1["id"] != v2["id"]
+    assert v2["id"] != v1["id"]
 
 
 @pytest.mark.unit
