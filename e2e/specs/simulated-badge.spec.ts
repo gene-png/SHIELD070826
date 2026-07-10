@@ -30,15 +30,12 @@ import {
  * mode — AI features are disabled") flips both assertions, so the test is not
  * vacuous.
  *
- * Surface (b), the Run-AI "Simulated" badge, is intentionally NOT asserted here
- * because it is UNREACHABLE in the running application: in fixture mode every
- * Run-AI/extract job 500s with `KeyError: No fixture registered for purpose=…`.
- * The deployed fixture provider (app/ai/llm.py `_build_provider`, which returns
- * a bare `FixtureProvider()`) has no per-purpose fixture responses registered —
- * only the test suite registers them via `FixtureProvider.register(...)`. So a
- * user can never see the badge by clicking. This is a product gap, reported to
- * the caller rather than worked around; a test that had to change the product
- * to go green would not be evidence.
+ * Surface (b), the Run-AI "Simulated" badge, was unreachable through Sprint A
+ * because fixture-mode Run-AI 500'd (`KeyError: No fixture registered`). X-8
+ * fixed that, so the badge is now reachable and is asserted end-to-end in
+ * `playbook-export-gate.spec.ts` (the CSF Run-AI happy path), where the Run-AI
+ * result and the badge render together. It is not duplicated here to avoid a
+ * second full seed + Run-AI flow.
  */
 
 async function openTechDebt(page: Page, title: string): Promise<void> {

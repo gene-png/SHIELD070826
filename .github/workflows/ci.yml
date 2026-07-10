@@ -96,27 +96,39 @@ jobs:
   e2e:
     name: E2E (Playwright, composed stack)
     runs-on: ubuntu-latest
-    # Sprint 0 lands this non-blocking so a harness hiccup cannot wedge the
-    # first remediation PRs. Flip to blocking once it has run green for a
-    # full sprint (tracked in FABLE_REMEDIATION_PLAN.md, Sprint 1 exit).
+    # Sprint B fixes the two reasons this job could never reach the specs: the
+    # job-level NEXTAUTH_URL below, and --no-deps on the run step. Kept
+    # non-blocking until the FIRST hosted run is observed green (the specs pass
+    # three runs in a row locally against the exact command sequence below); a
+    # follow-up commit flips continue-on-error off once that is confirmed.
     continue-on-error: true
+    env:
+      # Every step (up AND run) must see the SAME NEXTAUTH_URL, and it must equal
+      # the origin the browser uses inside the compose network (web:3000), or
+      # NextAuth rejects the credentials callback. This is set HERE, on the job,
+      # NOT as the compose default in docker-compose.yml — that default is
+      # http://localhost:3000, which is correct for a human on the host.
+      NEXTAUTH_URL: http://web:3000
+      # Fixture mode: no ANTHROPIC_API_KEY is available to CI, and none is
+      # needed. The live smoke test (tests/live) stays skipped. Fixture-mode AI
+      # actually works in the app as of X-8 (Sprint A), so the run-ai specs pass.
+      SHIELD_LLM_MODE: fixture
     steps:
       - uses: actions/checkout@v7
 
-      # Fixture mode: no ANTHROPIC_API_KEY is available to CI, and none is
-      # needed. The live smoke test (tests/live) stays skipped.
       - name: Bring up the stack
-        env:
-          SHIELD_LLM_MODE: fixture
         run: docker compose up -d --wait db redis minio createbuckets api web
 
       - name: Seed the demo tenant
         run: docker compose exec -T api python scripts/seed_demo.py
 
+      # --no-deps: the stack is already up with the correct NEXTAUTH_URL. Without
+      # it, `compose run` re-creates the web service from its current config and
+      # can drop the override, silently reverting sign-in to the broken state.
       - name: Run Playwright
         env:
           CI: "true"
-        run: docker compose --profile test run --rm playwright
+        run: docker compose --profile test run --rm --no-deps playwright
 
       - name: Dump API logs on failure
         if: failure()

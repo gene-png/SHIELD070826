@@ -40,36 +40,60 @@ export async function signIn(
   await page.goto("/sign-in");
   await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
 
-  const status = await page.evaluate(
-    async ({ email, password, callbackUrl }) => {
-      const csrf = await fetch("/api/auth/csrf").then((r) => r.json());
-      const body = new URLSearchParams({
-        email,
-        password,
-        csrfToken: csrf.csrfToken,
-        callbackUrl,
-        json: "true",
-      });
-      const res = await fetch("/api/auth/callback/credentials", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-      });
-      return res.status;
-    },
-    { email, password, callbackUrl },
-  );
-  if (status >= 400) {
-    throw new Error(`credential sign-in POST failed for ${email}: ${status}`);
+  // Perform NextAuth's csrf -> callback handshake and report whether a real
+  // session resulted. Returns the callback status + whether /api/auth/session
+  // now carries a user.
+  async function attemptSignIn(): Promise<{
+    status: number;
+    hasUser: boolean;
+  }> {
+    return page.evaluate(
+      async ({ email, password, callbackUrl }) => {
+        const csrf = await fetch("/api/auth/csrf").then((r) => r.json());
+        const body = new URLSearchParams({
+          email,
+          password,
+          csrfToken: csrf.csrfToken,
+          callbackUrl,
+          json: "true",
+        });
+        const res = await fetch("/api/auth/callback/credentials", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+        });
+        const session = await fetch("/api/auth/session")
+          .then((r) => r.json())
+          .catch(() => ({}));
+        return {
+          status: res.status,
+          hasUser: Boolean((session as { user?: unknown })?.user),
+        };
+      },
+      { email, password, callbackUrl },
+    );
   }
 
-  // Confirm a real session exists (deterministic; not a retry over flakiness).
-  const session = (await page.evaluate(() =>
-    fetch("/api/auth/session").then((r) => r.json()),
-  )) as { user?: unknown };
-  if (!session?.user) {
+  // Retry the WHOLE handshake, not just the session read. On a COLD next-dev
+  // stack (every CI run, and the first sign-in of any local run) the very first
+  // hit compiles the NextAuth routes, and the csrf cookie set by GET
+  // /api/auth/csrf can lose a race with the token posted to the callback — the
+  // callback then returns 200 but sets no session cookie, so no amount of
+  // re-reading the session helps. A fresh handshake (new csrf token + cookie)
+  // wins once the routes are warm. This retries a KNOWN-flaky auth handshake
+  // against a dev server, bounded to 3 tries; a genuinely bad credential fails
+  // every attempt and still throws below. (The real cure is a production build —
+  // no first-hit compile — tracked as the §8.6 follow-up.)
+  let last = { status: 0, hasUser: false };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    last = await attemptSignIn();
+    if (last.hasUser) break;
+    await page.waitForTimeout(1_000);
+  }
+  if (!last.hasUser) {
     throw new Error(
-      `no session established for ${email} after credential sign-in`,
+      `no session established for ${email} after 3 credential sign-in attempts ` +
+        `(last callback status ${last.status})`,
     );
   }
 

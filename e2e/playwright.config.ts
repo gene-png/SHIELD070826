@@ -23,7 +23,14 @@ export default defineConfig({
   // masking a real hang (a genuinely stuck call still fails at the action
   // timeout well before this).
   timeout: 120_000,
-  expect: { timeout: 15_000 },
+  // Same next-dev JIT reason as the test timeout above, one level down: an
+  // assertion whose FIRST hit to a route triggers that route's cold compile can
+  // exceed the 15s Playwright default. CI brings up a fresh stack every run, so
+  // every route is cold on first touch — the CSF workspace render and the
+  // multi-artifact Playbook export were the two that flaked at 15s. 30s absorbs
+  // the compile without hiding a hang; individual heavy assertions raise it
+  // further inline (see the export in playbook-export-gate).
+  expect: { timeout: 30_000 },
   // A flaky e2e suite is worse than none: it trains people to ignore red.
   // Retry once so a genuinely flaky test is visible as `flaky`, not as `passed`.
   retries: process.env.CI ? 2 : 1,
