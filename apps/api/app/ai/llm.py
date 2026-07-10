@@ -294,7 +294,16 @@ class AnthropicProvider:
 
 def _build_provider(settings: Settings) -> LLMProvider:
     if settings.shield_llm_mode == "fixture":
-        return FixtureProvider(model=settings.shield_llm_model)
+        # FIX X-8: fixture mode is the docker-compose default, so it must return a
+        # WORKING app offline. Register grounded, obviously-simulated defaults for
+        # every AI purpose here (never in FixtureProvider.__init__ — a bare
+        # provider must still raise on an unregistered purpose; see
+        # tests/unit/test_llm_client.py).
+        from app.ai.fixtures import register_default_fixtures
+
+        provider = FixtureProvider(model=settings.shield_llm_model)
+        register_default_fixtures(provider)
+        return provider
     if settings.shield_llm_provider == "anthropic":
         return AnthropicProvider(
             model=settings.shield_llm_model,
