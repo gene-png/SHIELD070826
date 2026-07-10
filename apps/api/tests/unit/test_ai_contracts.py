@@ -248,3 +248,66 @@ def test_provider_refuses_max_tokens_above_the_model_ceiling() -> None:
     provider = AnthropicProvider(model="claude-haiku-4-5", api_key="sk-fake")
     with _pytest.raises(LLMConfigurationError, match="exceeds the maximum output"):
         provider.complete("p", {}, max_tokens=128_000)
+
+
+def test_outgoing_payload_block_is_labeled() -> None:
+    """The payload must reach the model as *labeled* data, not a bare blob.
+
+    Found by the live smoke test. ``complete`` sends the prompt and the payload
+    as two text blocks. When the payload block was an unlabeled
+    ``json.dumps(payload)``, ``claude-haiku-4-5`` failed to connect it to a
+    prompt that says "from the supplied interview answers" and answered in
+    prose -- "I don't see the assessment data in your message" -- which
+    ``parse_json`` cannot parse. Both Haiku-pinned jobs (``csf_score``,
+    ``mitre_map``) took that path in production.
+
+    No fixture test can catch this: fixture mode never builds a request. This
+    guard runs offline by intercepting the SDK client, so the framing cannot be
+    dropped again without a red test.
+    """
+    from app.ai.llm import PAYLOAD_PREAMBLE, AnthropicProvider
+
+    captured: dict = {}
+
+    class _FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get_final_message(self):
+            class _Block:
+                type = "text"
+                text = '{"ok": true}'
+
+            class _Msg:
+                content = [_Block()]
+                usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
+
+            return _Msg()
+
+    class _FakeMessages:
+        def stream(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeStream()
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    provider = AnthropicProvider(model="claude-haiku-4-5", api_key="sk-fake")
+    provider._client = _FakeClient()
+    provider.complete("the prompt", {"items": [{"subcategory_code": "GV.OC-01"}]})
+
+    blocks = captured["messages"][0]["content"]
+    assert blocks[0]["text"] == "the prompt"
+
+    payload_block = blocks[1]["text"]
+    assert payload_block.startswith(PAYLOAD_PREAMBLE), (
+        "the payload block lost its label; Haiku will answer in prose and "
+        f"parse_json will raise. Got: {payload_block[:60]!r}"
+    )
+    # The real payload still egresses intact, immediately after the label.
+    assert json.loads(payload_block[len(PAYLOAD_PREAMBLE) :].strip()) == {
+        "items": [{"subcategory_code": "GV.OC-01"}]
+    }

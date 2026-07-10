@@ -20,6 +20,7 @@ The client's `invoke(...)` method:
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -31,6 +32,36 @@ from app.ai.redact import RedactionMode, redact_payload
 from app.config import Settings, get_settings
 from app.logging import correlation_id_var, get_logger
 from app.models.llm_call import LLMCall, LLMCallMode, LLMCallStatus
+
+# The label that introduces the payload block in every outgoing request.
+# Public so the regression test asserts against this constant rather than
+# restating the string (which would let the two drift apart).
+PAYLOAD_PREAMBLE = "Here is the input data, as JSON:"
+
+
+def _frame_payload(payload: dict[str, Any]) -> str:
+    """Label the payload block so the model knows it IS the data.
+
+    Found by the live smoke test, invisible to every fixture test.
+
+    ``complete`` sends the prompt and the payload as two separate text blocks.
+    The payload block used to be a bare ``json.dumps(payload)`` -- no label, no
+    framing. ``claude-haiku-4-5`` does not reliably connect an unlabeled JSON
+    blob to a prompt that says "from the supplied interview answers", and
+    instead replies in prose: "I don't see the assessment data in your message.
+    Please provide...". ``parse_json`` then raises on the first character.
+
+    That path is production for the two Haiku-pinned jobs, ``csf_score`` and
+    ``mitre_map``. Fixture mode could never catch it: fixtures never build a
+    request at all.
+
+    One labeled line fixes it, and it is applied here -- in the single blessed
+    egress path -- rather than in five prompts, so a job written tomorrow gets
+    it for free. The label is static text and carries no client data, so it
+    cannot defeat the redactor that already ran upstream.
+    """
+    return f"{PAYLOAD_PREAMBLE}\n{json.dumps(payload)}"
+
 
 _log = get_logger(__name__)
 
@@ -211,7 +242,6 @@ class AnthropicProvider:
         client = self._ensure_client()
         # Payload is sent as JSON inside the user message. The redactor has
         # already run upstream, so this content is safe to egress.
-        import json
 
         # Per-job overrides fall back to the model's own output ceiling rather
         # than a blanket 128000. Haiku 4.5 caps at 64K, and the full ATT&CK map
@@ -249,7 +279,7 @@ class AnthropicProvider:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "text", "text": json.dumps(payload)},
+                        {"type": "text", "text": _frame_payload(payload)},
                     ],
                 }
             ],
