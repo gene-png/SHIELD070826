@@ -87,8 +87,6 @@ class Settings(BaseSettings):
     jwt_refresh_ttl_seconds: int = Field(default=1800, ge=300)
     shield_account_lockout_max_attempts: int = Field(default=10, ge=1)
     shield_account_lockout_window_seconds: int = Field(default=900, ge=60)
-    shield_idle_timeout_seconds: int = Field(default=1800, ge=60)
-    shield_forced_reauth_seconds: int = Field(default=86400, ge=300)
 
     # JWT signing
     jwt_signing_secret: str = (

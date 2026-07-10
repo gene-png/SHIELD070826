@@ -63,6 +63,7 @@ from app.dependencies import current_client, current_user, require_role
 from app.models._common import utcnow
 from app.models.artifact import Artifact, ArtifactOrigin
 from app.models.client import Client
+from app.models.csf_action_item import CsfActionItem
 from app.models.csf_assessment import (
     CsfAnswer,
     CsfAssessment,
@@ -81,6 +82,9 @@ from app.schemas.csf import (
     CatalogResponse,
     CatalogSubcategory,
     CatalogTier,
+    CsfActionItemCreate,
+    CsfActionItemPatch,
+    CsfActionItemResponse,
     CsfAnswerPatch,
     CsfAnswerResponse,
     CsfAssessmentResponse,
@@ -439,9 +443,17 @@ def latest_assessment(
     # Phase 4 keeps assessment scoreboards admin-only until the
     # deliverable is released to the client (mirrors Phase 3 stage 9).
     if user.role != UserRole.ADMIN and assessment.status != CsfAssessmentStatus.RELEASED:
+        # FIX G-1: v1 delivers reports OUT OF BAND -- the consultant downloads the
+        # deliverable and shares it outside the app. No route ever assigns
+        # RELEASED (only scripts/seed_demo.py does), so this gate is permanently
+        # closed to clients by design. The enum member is kept (removing it needs a
+        # migration); the message no longer promises a release that cannot happen.
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="CSF assessments are admin-only until released.",
+            detail=(
+                "CSF assessments are not viewable in-app; your consultant will "
+                "deliver your report directly."
+            ),
         )
     return _serialize_assessment(db, assessment)
 
@@ -1395,6 +1407,11 @@ def export_playbook(
                 for r in trows
             ]
 
+    # FIX H-8: the Playbook's action plan (Step 10 / POA&M). These persistent
+    # rows carry the owner + due date the on-the-fly gap list never could, so
+    # the handover no longer relies on a side spreadsheet.
+    action_items = _action_items_for(db, a.id)
+
     from app.docx_export import DOCX_MIME
 
     org = None if client.legal_name == "(pending intake)" else client.legal_name
@@ -1427,6 +1444,7 @@ def export_playbook(
                 version=a.version,
                 enterprise_rows=enterprise_rows,
                 tier_profiles=tier_profiles,
+                action_items=action_items,
             ),
         ),
         (
@@ -1463,6 +1481,7 @@ def export_playbook(
                 version=a.version,
                 enterprise_rows=enterprise_rows,
                 generated_on=on,
+                action_items=action_items,
             ),
         ),
         (
@@ -1475,6 +1494,7 @@ def export_playbook(
                 version=a.version,
                 enterprise_rows=enterprise_rows,
                 generated_on=on,
+                action_items=action_items,
             ),
         ),
     ]
@@ -1504,6 +1524,159 @@ def export_playbook(
     a.documents_stale = False  # Work Order C3: exporting refreshes the documents
     db.commit()
     return CsfPlaybookExportResponse(artifacts=artifacts)
+
+
+# ---------------------------------------------------------------------------
+# Action plan / POA&M (Playbook Step 10, FIX H-8)
+# ---------------------------------------------------------------------------
+
+
+def _action_items_for(db: Session, assessment_id: uuid.UUID) -> list[CsfActionItem]:
+    """Every action item on an assessment, ordered for a stable render/export."""
+    return list(
+        db.execute(
+            select(CsfActionItem)
+            .where(CsfActionItem.assessment_id == assessment_id)
+            .order_by(CsfActionItem.subcategory_code, CsfActionItem.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
+@router.post(
+    "/assessments/{assessment_id}/action-items",
+    response_model=CsfActionItemResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an action-plan (POA&M) item from a gap row (admin)",
+)
+def create_action_item(
+    assessment_id: uuid.UUID,
+    body: CsfActionItemCreate,
+    user: Annotated[User, _admin_required],
+    client: Annotated[Client, Depends(current_client)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CsfActionItemResponse:
+    # Tenant boundary: a cross-tenant / unknown assessment id 404s here (the
+    # platform's no-existence-oracle convention), never 403. Creating an action
+    # item deliberately touches no CsfDimensionScore row, so it can never set
+    # scored_at and can never weaken the B-3 export gate.
+    a = require_csf_assessment_in_tenant(db, assessment_id, client.id)
+    if body.subcategory_code not in all_codes():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Unknown subcategory code.",
+        )
+    item = CsfActionItem(
+        assessment_id=a.id,
+        client_id=client.id,
+        subcategory_code=body.subcategory_code,
+        owner=body.owner,
+        due_date=body.due_date,
+        milestone=body.milestone,
+        status=body.status,
+    )
+    db.add(item)
+    db.flush()
+    audit(
+        db,
+        action="csf.action_item.created",
+        target_type="csf_action_item",
+        target_id=item.id,
+        actor_user_id=user.id,
+        details={"assessment_id": str(a.id), "subcategory_code": item.subcategory_code},
+    )
+    db.commit()
+    db.refresh(item)
+    return CsfActionItemResponse.model_validate(item, from_attributes=True)
+
+
+@router.get(
+    "/assessments/{assessment_id}/action-items",
+    response_model=list[CsfActionItemResponse],
+    summary="List the action-plan (POA&M) items for an assessment (admin)",
+)
+def list_action_items(
+    assessment_id: uuid.UUID,
+    user: Annotated[User, _admin_required],
+    client: Annotated[Client, Depends(current_client)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[CsfActionItemResponse]:
+    a = require_csf_assessment_in_tenant(db, assessment_id, client.id)
+    return [
+        CsfActionItemResponse.model_validate(r, from_attributes=True)
+        for r in _action_items_for(db, a.id)
+    ]
+
+
+@router.patch(
+    "/action-items/{item_id}",
+    response_model=CsfActionItemResponse,
+    summary="Update an action-plan item: owner / due date / milestone / status (admin)",
+)
+def patch_action_item(
+    item_id: uuid.UUID,
+    body: CsfActionItemPatch,
+    user: Annotated[User, _admin_required],
+    client: Annotated[Client, Depends(current_client)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CsfActionItemResponse:
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one field is required.",
+        )
+    item = db.get(CsfActionItem, item_id)
+    # Tenant check via the denormalized client_id: a cross-tenant id 404s.
+    if item is None or item.client_id != client.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Action item not found.",
+        )
+    for field in ("owner", "due_date", "milestone", "status"):
+        if field in data:
+            setattr(item, field, data[field])
+    audit(
+        db,
+        action="csf.action_item.updated",
+        target_type="csf_action_item",
+        target_id=item.id,
+        actor_user_id=user.id,
+        details={"fields": sorted(data.keys())},
+    )
+    db.commit()
+    db.refresh(item)
+    return CsfActionItemResponse.model_validate(item, from_attributes=True)
+
+
+@router.delete(
+    "/action-items/{item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an action-plan item (admin)",
+)
+def delete_action_item(
+    item_id: uuid.UUID,
+    user: Annotated[User, _admin_required],
+    client: Annotated[Client, Depends(current_client)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    item = db.get(CsfActionItem, item_id)
+    if item is None or item.client_id != client.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Action item not found.",
+        )
+    db.delete(item)
+    audit(
+        db,
+        action="csf.action_item.deleted",
+        target_type="csf_action_item",
+        target_id=item_id,
+        actor_user_id=user.id,
+        details={"assessment_id": str(item.assessment_id)},
+    )
+    db.commit()
 
 
 # ---------------------------------------------------------------------------

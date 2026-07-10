@@ -15,11 +15,14 @@ import { MessageThread } from "@/components/messages/MessageThread";
 import { fetchAssessments } from "@/lib/intake/client";
 import { SERVICE_LABELS, type AssessmentResponse } from "@/lib/intake/types";
 
+// v1 deliverables are handed over out of band, so the final client-facing step
+// is an honest "Complete" rather than an in-app "released" state that no route
+// ever sets. The consultant delivers the report directly (see the note below).
 const TIMELINE_STEPS = [
   "Started",
   "Under review",
   "Approved",
-  "Report released",
+  "Complete",
 ] as const;
 
 /** Furthest lifecycle step reached, from either status field. */
@@ -187,7 +190,8 @@ export function AssessmentDetailView({
           </ol>
           <p className="text-xs text-ink-tertiary">
             Started {created.toLocaleDateString()}. We&apos;ll message you here
-            if we need anything, and share the results directly.
+            if we need anything. When it&apos;s complete, your consultant will
+            deliver your report to you directly.
           </p>
         </CardBody>
       </Card>

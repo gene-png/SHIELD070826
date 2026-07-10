@@ -229,3 +229,33 @@ class AdminDomainListResponse(BaseModel):
 
 class AdminDomainCreateRequest(BaseModel):
     domain: str
+
+
+class AdminAuditRow(BaseModel):
+    """One append-only audit_entries row, read-only (FIX H-7).
+
+    `actor_email` is resolved from the users table for display; it is None when
+    the actor is a system action or the account has since been purged. The row
+    is never written back — this schema is response-only.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    at: datetime
+    actor_user_id: uuid.UUID | None
+    actor_email: str | None
+    action: str
+    target_type: str
+    target_id: uuid.UUID | None
+    details: dict | None
+    correlation_id: str | None
+
+
+class AdminAuditListResponse(BaseModel):
+    """A page of audit rows plus the filtered total for pagination (FIX H-7)."""
+
+    rows: list[AdminAuditRow]
+    total: int
+    limit: int
+    offset: int

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { getServerSession } from "next-auth";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { Card, CardBody, CardHeader, CardTitle } from "@shield/design-system";
@@ -87,13 +88,19 @@ export default async function SelfAssessmentPage({
         ) : (
           <Card>
             <CardHeader>
-              <CardTitle>Open this from your intake confirmation</CardTitle>
+              <CardTitle>Open this from My Assessments</CardTitle>
             </CardHeader>
-            <CardBody>
+            <CardBody className="flex flex-col items-start gap-3">
               <p className="text-sm text-ink-secondary">
-                We couldn&apos;t tell which assessment to load. Head back to
-                your intake confirmation and pick a self-assessment to start.
+                We couldn&apos;t tell which assessment to load. Head back to My
+                Assessments and open the one you want to work on.
               </p>
+              <Link
+                href="/assessments"
+                className="rounded-md bg-brand-500 px-4 py-2 text-sm font-semibold text-ink-on-accent hover:bg-brand-600"
+              >
+                Go to My Assessments
+              </Link>
             </CardBody>
           </Card>
         )}

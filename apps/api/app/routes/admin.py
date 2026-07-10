@@ -11,10 +11,14 @@ Phase 2 ships the read-only queue view. Phase 3+ adds the workflow surfaces
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import uuid
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -24,6 +28,7 @@ from app.db.session import get_db
 from app.dependencies import require_role
 from app.models._common import utcnow
 from app.models.artifact import Artifact
+from app.models.audit_entry import AuditEntry
 from app.models.client import Client
 from app.models.client_domain import ClientDomain
 from app.models.service import Service, ServiceKind, ServiceStatus
@@ -34,6 +39,8 @@ from app.schemas.admin import (
     AdminAiUsageResponse,
     AdminAiUsageRow,
     AdminArtifactRow,
+    AdminAuditListResponse,
+    AdminAuditRow,
     AdminClientCreateRequest,
     AdminClientListResponse,
     AdminClientSummary,
@@ -322,7 +329,7 @@ def reactivate_user(
 @router.get(
     "/clients",
     response_model=AdminClientListResponse,
-    summary="List all clients (admin/reviewer)",
+    summary="List all clients (admin)",
 )
 def list_clients(
     _admin: Annotated[User, _admin_required],
@@ -375,7 +382,7 @@ def create_client(
 @router.get(
     "/clients/{cid}",
     response_model=AdminClientSummary,
-    summary="Client detail (admin/reviewer)",
+    summary="Client detail (admin)",
 )
 def get_client(
     cid: uuid.UUID,
@@ -809,3 +816,162 @@ def ai_usage(
             "figure; rows with an unlisted model report a null cost."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Audit log viewer (FIX H-7)
+# ---------------------------------------------------------------------------
+
+# Hard ceiling on a single CSV export so a filter that matches everything can't
+# stream an unbounded response. Interactive paging uses `limit`/`offset`.
+_AUDIT_CSV_MAX_ROWS = 10_000
+
+# CSV column order, kept stable so downstream tooling can rely on it.
+_AUDIT_CSV_COLUMNS = (
+    "at",
+    "action",
+    "actor_user_id",
+    "actor_email",
+    "target_type",
+    "target_id",
+    "correlation_id",
+    "details",
+)
+
+
+def _audit_filtered_stmt(
+    *,
+    action: str | None,
+    actor_id: uuid.UUID | None,
+    target_type: str | None,
+    target_id: uuid.UUID | None,
+    client_id: uuid.UUID | None,
+    start: datetime | None,
+    end: datetime | None,
+):
+    """Build the filtered (unpaginated, unordered) AuditEntry SELECT.
+
+    READ-ONLY: this only ever composes a SELECT. The audit endpoint never
+    inserts, updates, or deletes an audit row (append-only invariant, enforced
+    by both a Postgres trigger and an ORM before_flush listener).
+
+    `client_id` scopes to rows that directly concern a client. audit_entries
+    carries no client_id column, so this matches the client-targeted rows
+    (target_type='client' AND target_id=<client_id>); broader per-tenant
+    scoping would require a schema change to the append-only table.
+    """
+    stmt = select(AuditEntry)
+    if action is not None:
+        stmt = stmt.where(AuditEntry.action == action)
+    if actor_id is not None:
+        stmt = stmt.where(AuditEntry.actor_user_id == actor_id)
+    if target_type is not None:
+        stmt = stmt.where(AuditEntry.target_type == target_type)
+    if target_id is not None:
+        stmt = stmt.where(AuditEntry.target_id == target_id)
+    if client_id is not None:
+        stmt = stmt.where(
+            AuditEntry.target_type == "client",
+            AuditEntry.target_id == client_id,
+        )
+    if start is not None:
+        stmt = stmt.where(AuditEntry.at >= start)
+    if end is not None:
+        stmt = stmt.where(AuditEntry.at <= end)
+    return stmt
+
+
+def _resolve_actor_emails(db: Session, rows: list[AuditEntry]) -> dict[uuid.UUID, str]:
+    """One batched lookup of actor id -> email for display."""
+    actor_ids = {r.actor_user_id for r in rows if r.actor_user_id is not None}
+    if not actor_ids:
+        return {}
+    users = db.execute(select(User).where(User.id.in_(actor_ids))).scalars().all()
+    return {u.id: u.email for u in users}
+
+
+@router.get(
+    "/audit",
+    response_model=AdminAuditListResponse,
+    summary="Read the append-only audit trail (admin)",
+)
+def audit_log(
+    _admin: Annotated[User, _admin_required],
+    db: Annotated[Session, Depends(get_db)],
+    action: str | None = None,
+    actor_id: uuid.UUID | None = None,
+    target_type: str | None = None,
+    target_id: uuid.UUID | None = None,
+    client_id: uuid.UUID | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    format: str = Query(default="json", pattern="^(json|csv)$"),
+) -> Response | AdminAuditListResponse:
+    """Cross-tenant, read-only view of the audit_entries trail (FIX H-7).
+
+    The platform writes a genuinely append-only audit trail that previously
+    had no reader without direct SQL access. This surfaces it to admins with
+    filters (action, actor, target, client, date range), newest first, paged.
+    Pass `format=csv` to download the filtered set (capped at
+    `_AUDIT_CSV_MAX_ROWS`).
+
+    This handler performs NO writes: it only issues SELECTs and never adds,
+    updates, or deletes an audit row.
+    """
+    base = _audit_filtered_stmt(
+        action=action,
+        actor_id=actor_id,
+        target_type=target_type,
+        target_id=target_id,
+        client_id=client_id,
+        start=start,
+        end=end,
+    )
+    # Newest first; id as a stable tiebreaker for equal timestamps.
+    ordered = base.order_by(AuditEntry.at.desc(), AuditEntry.id.desc())
+
+    if format == "csv":
+        rows = db.execute(ordered.limit(_AUDIT_CSV_MAX_ROWS)).scalars().all()
+        emails = _resolve_actor_emails(db, rows)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_AUDIT_CSV_COLUMNS)
+        for r in rows:
+            writer.writerow(
+                [
+                    r.at.isoformat(),
+                    r.action,
+                    str(r.actor_user_id) if r.actor_user_id else "",
+                    emails.get(r.actor_user_id, "") if r.actor_user_id else "",
+                    r.target_type,
+                    str(r.target_id) if r.target_id else "",
+                    r.correlation_id or "",
+                    json.dumps(r.details, default=str) if r.details else "",
+                ]
+            )
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="audit-log.csv"'},
+        )
+
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    page = db.execute(ordered.limit(limit).offset(offset)).scalars().all()
+    emails = _resolve_actor_emails(db, page)
+    out = [
+        AdminAuditRow(
+            id=r.id,
+            at=r.at,
+            actor_user_id=r.actor_user_id,
+            actor_email=emails.get(r.actor_user_id) if r.actor_user_id else None,
+            action=r.action,
+            target_type=r.target_type,
+            target_id=r.target_id,
+            details=r.details,
+            correlation_id=r.correlation_id,
+        )
+        for r in page
+    ]
+    return AdminAuditListResponse(rows=out, total=total, limit=limit, offset=offset)

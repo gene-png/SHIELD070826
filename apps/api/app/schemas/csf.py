@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.csf_action_item import CsfActionItemStatus
 from app.models.csf_assessment import CsfAssessmentStatus
 from app.models.service import ServiceKind, ServiceStatus
 
@@ -320,3 +321,45 @@ class CsfPlaybookExportResponse(BaseModel):
     full playbook, each as a downloadable file (Work Order D4)."""
 
     artifacts: list[ExportedArtifact]
+
+
+# ---------------------------------------------------------------------------
+# Action plan / POA&M (Playbook Step 10, FIX H-8)
+# ---------------------------------------------------------------------------
+
+
+class CsfActionItemCreate(BaseModel):
+    """Create a POA&M row from a gap: which subcategory, who owns it, by when.
+
+    Only `subcategory_code` is required — the workspace fills the rest as the
+    plan firms up. `status` defaults to open.
+    """
+
+    subcategory_code: str = Field(min_length=1, max_length=16)
+    owner: str | None = Field(default=None, max_length=255)
+    due_date: date | None = None
+    milestone: str | None = Field(default=None, max_length=8000)
+    status: CsfActionItemStatus = CsfActionItemStatus.OPEN
+
+
+class CsfActionItemPatch(BaseModel):
+    """Partial update: reassign an owner, move a date, advance the status."""
+
+    owner: str | None = Field(default=None, max_length=255)
+    due_date: date | None = None
+    milestone: str | None = Field(default=None, max_length=8000)
+    status: CsfActionItemStatus | None = None
+
+
+class CsfActionItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    assessment_id: uuid.UUID
+    subcategory_code: str
+    owner: str | None
+    due_date: date | None
+    milestone: str | None
+    status: CsfActionItemStatus
+    created_at: datetime
+    updated_at: datetime

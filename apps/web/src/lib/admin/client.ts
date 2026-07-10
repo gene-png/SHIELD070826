@@ -1,9 +1,11 @@
 "use client";
 
 import type {
+  AdminAuditListResponse,
   AdminIntakeQueueResponse,
   AdminServiceRow,
   AdminUserDetail,
+  AuditLogQuery,
   FulfillServiceRequestResponse,
 } from "./types";
 
@@ -168,4 +170,41 @@ export async function archiveService(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await _detail(res));
+}
+
+// --- Audit log (FIX H-7) ----------------------------------------------------
+
+/** Turn an AuditLogQuery into a query string, dropping empty/undefined fields. */
+export function auditQueryString(query: AuditLogQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export async function fetchAuditLog(
+  query: AuditLogQuery,
+): Promise<AdminAuditListResponse> {
+  const res = await fetch(`/api/proxy/admin/audit${auditQueryString(query)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(await _detail(res));
+  return (await res.json()) as AdminAuditListResponse;
+}
+
+/** Href for the CSV export of the current filter set (paging is irrelevant). */
+export function auditCsvHref(query: AuditLogQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (key === "limit" || key === "offset") continue;
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  }
+  params.set("format", "csv");
+  return `/api/proxy/admin/audit?${params.toString()}`;
 }

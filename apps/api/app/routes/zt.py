@@ -674,9 +674,17 @@ def latest_assessment(
             detail="No assessment yet.",
         )
     if user.role != UserRole.ADMIN and a.status != ZtAssessmentStatus.RELEASED:
+        # FIX G-1: v1 delivers reports OUT OF BAND -- the consultant downloads the
+        # deliverable and shares it outside the app. No route ever assigns
+        # RELEASED (only scripts/seed_demo.py does), so this gate is permanently
+        # closed to clients by design. The enum member is kept (removing it needs a
+        # migration); the message no longer promises a release that cannot happen.
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="ZT assessments are admin-only until released.",
+            detail=(
+                "Zero Trust assessments are not viewable in-app; your consultant will "
+                "deliver your report directly."
+            ),
         )
     return _serialize_assessment(db, a)
 

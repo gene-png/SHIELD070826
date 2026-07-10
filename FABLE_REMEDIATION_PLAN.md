@@ -690,9 +690,57 @@ Reverting the line that _looks like_ the fix is not the same as reverting the fi
 2. **Two self-inflicted environment errors, recorded for honesty.** (a) I patched `llm.py` while a background `pytest` was mid-run, contaminating it; killed, verified no `TEMP` markers survived, re-ran clean. (b) I ran `pnpm install` inside the web container to obtain `tsc`, which resolved a second Next variant into the pnpm store and broke the dev server with `Cannot find module '../lib/picocolors'`. Rebuilt the `node-modules-root`/`node-modules-web` volumes from the lockfile. Neither touched a line of the deliverable.
 3. The AI-runtime subagent stalled for ~20 minutes on a full-suite run and was stopped; its work was already complete, and I validated every claim directly rather than resuming it.
 
-### Sprint 3 — Complete Deliverables and Truth
+### Sprint 3 — Complete Deliverables and Truth — STEP 2 ✅ (F-3, H-8, D-4, G-1, H-7) — SPRINT 3 CLOSED
 
-> _Not started._
+**Executed 2026-07-09.** Three Opus subagents plus the lead. Two agents died mid-run on a transient SSL error _after_ completing their implementations; the lead verified every claim directly rather than resuming them blindly.
+
+| Gate                                       | Result                                                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `alembic upgrade → downgrade -2 → upgrade` | `0032 → 0033 → 0034` reversible; `csf_action_items` created; `risk_entries.locked` / `deleted_at` added |
+| `ruff` / `black`                           | clean, 224 files                                                                                        |
+| `prettier --check` (CI glob)               | clean repo-wide                                                                                         |
+| `tsc --noEmit`                             | **zero errors**                                                                                         |
+| `pnpm -F web lint`                         | **`✔ No ESLint warnings or errors`**                                                                    |
+| `pnpm install --frozen-lockfile`           | exit 0                                                                                                  |
+
+**F-3 — the register's integrity rests on one invariant, and it holds.** The tier is _always_ re-derived from the (possibly edited) likelihood and impact; `RiskEntryPatch` has no `tier` field, so a client-supplied one is dropped. Accepting a tier would let someone launder a critical risk into a low one. The gate now requires **ATT&CK APPROVED and (CSF or ZT) APPROVED**, not merely "exists" — previously the register unlocked the moment an ATT&CK assessment was _started_, and generated that early it read as a clean bill of health. The CSF harvest re-derives the client's target tier from `ServiceRequest.csf_target_tier` instead of hardcoding 3. Locked entries survive regenerate, following the C2 lock semantics the other three services already use rather than inventing a fourth.
+
+Confirmed, as the audit predicted: **ZT already honours a per-row target**, so the fixed-threshold defect is CSF-specific. The document states it too broadly.
+
+**H-8 — the difference between an assessment and a plan.** `CsfActionItem` (owner, due date, milestone, status), an "Action Plan" sheet in the XLSX and a matching DOCX/PDF section. Verified that creating an action item does **not** set `scored_at`, so B-3's export gate still holds.
+
+**G-1 — the code now says what the product does.** The frontend agent removed the client-facing "Report released" label and correctly flagged three backend client-visibility gates it did not own. **The lead fixed those.** Each said _"admin-only until released"_ — promising a release **no route can grant**, since only `scripts/seed_demo.py` ever writes `RELEASED`. The gates stay closed (clients should not see drafts) but now read _"not viewable in-app; your consultant will deliver your report directly,"_ with a comment explaining why the enum member survives.
+
+**H-7 — the audit trail becomes a product feature.** `GET /admin/audit`: admin-gated, cross-tenant, filterable, paginated, CSV. It performs **zero writes** — the handler only composes `select(...)`, and a test asserts the `audit_entries` row count is identical before and after JSON, filtered, CSV and paged calls. Role gate proven: removing it yields `assert 200 == 403` for a client-role user.
+
+**D-4 — all six potholes closed.** Active Work was **built** (a cross-client table of in-progress services with workspace links) rather than removed, using only the existing `/admin/services` and `/admin/clients` endpoints. The `/dev` preview is gated by a server layout: unauthenticated → redirect to sign-in; authenticated non-admin → `notFound()`, matching the API's no-existence-oracle convention rather than confirming the route exists.
+
+**Carry-overs closed:** Risk export filenames now route through `deliverable_filename` (B-7 sub-fix 4, the half left undone); the dead `shield_idle_timeout_seconds` / `shield_forced_reauth_seconds` definitions are gone from `config.py`; the two `"(admin/reviewer)"` OpenAPI summaries are corrected for a role that no longer exists.
+
+**Lead process errors, recorded.** Twice I edited route files while a full suite was running, contaminating it. Both runs were killed and re-run on a quiescent tree. Neither affected a line of the deliverable — but a test result taken mid-edit is not evidence.
+
+**A THIRD pre-existing defect, found by the Sprint 0 harness: `main` did not serve HTTP 200.**
+
+While running the final Playwright pass I found `apps/web` pinned `react-dom@19.2.7` and `@types/react-dom@19.2.3` against `react@18.3.1` and `next@14.2.15` — committed on `HEAD`, before any of this work. React and React-DOM must share a major version. The dev server returned **HTTP 500 on every request**, failing inside `next/dist/pages/_document.js`.
+
+That makes **three Dependabot bumps merged without their peer upgrades**:
+
+| Package              | Committed | Needs                | Symptom             |
+| -------------------- | --------- | -------------------- | ------------------- |
+| `eslint-config-next` | `16.2.10` | `eslint>=9`, Next 16 | `next lint` crashed |
+| `react-dom`          | `19.2.7`  | `react@19`           | dev server 500s     |
+| `@types/react-dom`   | `19.2.3`  | `@types/react@19`    | type mismatch       |
+
+All three are now aligned to the Next-14 / React-18 line, `pnpm-lock.yaml` regenerated (no peer warnings), `--frozen-lockfile` verifies, the homepage serves **200**, and Playwright passes 3/3 including the console-errors check.
+
+Each bump looks innocuous in a PR diff — a version number, and the Python suite stays green because it never touches the web tier. The failures surface only when something actually _runs_ the app. That is the same structural lesson as the code defects: **the suite was green because nothing exercised the real path.** The plan's own Deferred Backlog says the framework-majors bundle (Next 15/16, React 19, Tailwind 4) must be done "as one e2e-netted pass after the fix sprints, never during them." Pieces of it were merged early, without the net. The Sprint 0 harness is that net, and it is what caught this.
+
+**Still open, and not claimed as done:**
+
+1. **H-6 is partial.** The preview helper is generic across all five jobs and wired to ZT. CSF and ATT&CK are not wired, and the one-time per-client acknowledgment gate before the first live run is not implemented.
+2. **Live AI is unproven against the real API.** No `ANTHROPIC_API_KEY`. The gated live smoke test arms the moment a key exists. No live Claude call has been made and none is claimed.
+3. **`PublicHeader` makes a server-side `/intake` fetch on every authenticated non-admin render.** Guarded and fails closed, but it deserves caching.
+4. **The v2 Work Order does not exist in the repository.** `find . -iname "*work*order*"` returns nothing, yet **41 files under `apps/api/app` cite it** as the spec for the A–F changes. It cannot be invented, and it is a real risk to the next maintainer.
 
 ---
 

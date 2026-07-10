@@ -25,6 +25,7 @@ const NAV: NavItem[] = [
   { label: "Risk Register", href: "/admin/risk-register" },
   { label: "Messages", href: "/admin/messages" },
   { label: "Users", href: "/admin/users" },
+  { label: "Audit Log", href: "/admin/audit" },
   { label: "Management", href: "/admin/management" },
 ];
 

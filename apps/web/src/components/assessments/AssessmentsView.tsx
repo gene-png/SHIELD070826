@@ -52,9 +52,12 @@ function statusLabel(e: AssessmentResponse): string {
     case "approved":
       return "Approved";
     case "released":
-      return "Report released";
+      // v1 deliverables are handed over out of band (the consultant downloads
+      // and shares them); there is no in-app "release" action. Show honest copy
+      // instead of a "released" label nothing in the product can satisfy.
+      return "Complete";
     default:
-      return e.status === "released" ? "Released" : "In progress";
+      return e.status === "released" ? "Complete" : "In progress";
   }
 }
 

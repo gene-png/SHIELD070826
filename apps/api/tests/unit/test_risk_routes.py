@@ -71,6 +71,7 @@ def _admin(c: TestClient) -> tuple[str, str]:
 
 
 def _seed_attack_and_zt(c: TestClient, bearer: str, cid: str) -> tuple[str, str]:
+    # FIX F-3: the risk gate now requires APPROVED sources, so approve both.
     h = {"Authorization": f"Bearer {bearer}", "X-Client-Id": cid}
     asvc = c.post(
         "/attack/services", headers=h, json={"kind": "attack_coverage", "title": "ATT&CK"}
@@ -79,12 +80,14 @@ def _seed_attack_and_zt(c: TestClient, bearer: str, cid: str) -> tuple[str, str]
     cov = a.json()["coverage"][0]
     technique = cov["technique_code"]
     c.patch(f"/attack/coverage/{cov['id']}", headers=h, json={"status": "gap"})
+    c.post(f"/attack/assessments/{a.json()['id']}/approve", headers=h)
 
     zsvc = c.post("/zt/services", headers=h, json={"kind": "zero_trust_cisa", "title": "ZT"})
     za = c.post(f"/zt/services/{zsvc.json()['id']}/assessments", headers=h)
     zans = za.json()["answers"][0]
     capability = zans["capability_code"]
     c.patch(f"/zt/answers/{zans['id']}", headers=h, json={"maturity_stage": 1})
+    c.post(f"/zt/assessments/{za.json()['id']}/approve", headers=h)
     return technique, capability
 
 

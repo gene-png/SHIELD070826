@@ -36,6 +36,7 @@ def render_xlsx(
     version: int,
     enterprise_rows: Sequence[Any],
     tier_profiles: Mapping[str, Sequence[Any]],
+    action_items: Sequence[Any] = (),
 ) -> bytes:
     """`enterprise_rows` are EnterpriseSubcategory-like; `tier_profiles` maps a
     tier name to its CsfDimensionScoreResponse-like rows (total/level computed)."""
@@ -127,6 +128,17 @@ def render_xlsx(
                 ]
             )
         _autofit(ts)
+
+    # Action Plan (POA&M) — Playbook Step 10. Structured owner + due-date rows so
+    # the action plan ships inside the deliverable instead of a side spreadsheet.
+    aps = wb.create_sheet("Action Plan")
+    _header(aps, ACTION_PLAN_HEADER)
+    action_rows = _action_plan_rows(action_items)
+    for row in action_rows:
+        aps.append(row)
+    if not action_rows:
+        aps.append(["—", "No action items recorded", "", "", ""])
+    _autofit(aps)
 
     cover = wb.create_sheet("About", 0)
     cover.append(["SHIELD by Kentro — CSF 2.0 Full Playbook"])
@@ -308,6 +320,42 @@ def _gap_rows(rows: Sequence[Any], *, limit: int | None = None) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
+# Action plan / POA&M (Playbook Step 10, FIX H-8)
+# ---------------------------------------------------------------------------
+
+ACTION_PLAN_HEADER = ["Subcategory", "Owner", "Due date", "Milestone", "Status"]
+_ACTION_STATUS_LABELS = {"open": "Open", "in_progress": "In progress", "done": "Done"}
+
+
+def _action_status_label(item: Any) -> str:
+    raw = str(getattr(item, "status", "") or "")
+    return _ACTION_STATUS_LABELS.get(raw, raw)
+
+
+def _action_due(item: Any) -> str:
+    d = getattr(item, "due_date", None)
+    return d.isoformat() if d else ""
+
+
+def _action_plan_rows(action_items: Sequence[Any]) -> list[list[str]]:
+    """One [subcategory, owner, due date, milestone, status] row per action item.
+
+    Owner defaults to "Unassigned" so a committed but not-yet-owned action still
+    reads as a plan, not a blank. Ordering is the caller's (query orders by
+    subcategory then created_at)."""
+    return [
+        [
+            it.subcategory_code,
+            it.owner or "Unassigned",
+            _action_due(it),
+            (getattr(it, "milestone", None) or ""),
+            _action_status_label(it),
+        ]
+        for it in action_items
+    ]
+
+
+# ---------------------------------------------------------------------------
 # PDF helpers
 # ---------------------------------------------------------------------------
 
@@ -447,6 +495,42 @@ def _gap_table(story: list[Any], styles: dict[str, Any], gaps: Sequence[Any]) ->
     )
 
 
+def _action_plan_table_pdf(
+    story: list[Any], styles: dict[str, Any], action_items: Sequence[Any]
+) -> None:
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph
+
+    story.append(
+        Paragraph(
+            "Owners and target dates for closing each gap. Maintained in-platform "
+            "so the plan travels with the deliverable.",
+            styles["body"],
+        )
+    )
+    rows = _action_plan_rows(action_items)
+    if not rows:
+        story.append(Paragraph("No action items recorded for this assessment yet.", styles["body"]))
+        return
+    body = [
+        [
+            r[0],
+            r[1],
+            r[2] or "—",
+            Paragraph(escape(r[3]), styles["cell"]),
+            r[4],
+        ]
+        for r in rows
+    ]
+    story.append(
+        _pdf_table(
+            ACTION_PLAN_HEADER,
+            body,
+            [0.9 * inch, 1.4 * inch, 1.0 * inch, 2.6 * inch, 1.0 * inch],
+        )
+    )
+
+
 def _new_pdf(out: io.BytesIO, title: str, client_name: str) -> Any:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch
@@ -506,6 +590,7 @@ def render_full_pdf(
     version: int,
     enterprise_rows: Sequence[Any],
     generated_on: str | None = None,
+    action_items: Sequence[Any] = (),
 ) -> bytes:
     from reportlab.lib.units import inch
     from reportlab.platypus import PageBreak, Paragraph
@@ -532,6 +617,7 @@ def render_full_pdf(
             "Maturity scorecard",
             "Function detail",
             "Prioritized roadmap",
+            "Action plan (POA&M)",
             "Appendix — all subcategories",
         ],
         start=1,
@@ -596,7 +682,11 @@ def render_full_pdf(
     _gap_table(story, styles, _gap_rows(enterprise_rows))
 
     story.append(PageBreak())
-    story.append(Paragraph("6. Appendix — all subcategories", styles["h2"]))
+    story.append(Paragraph("6. Action plan (POA&M)", styles["h2"]))
+    _action_plan_table_pdf(story, styles, action_items)
+
+    story.append(PageBreak())
+    story.append(Paragraph("7. Appendix — all subcategories", styles["h2"]))
     appx = [
         [
             r.subcategory_code,
@@ -738,6 +828,7 @@ def render_full_docx(
     version: int,
     enterprise_rows: Sequence[Any],
     generated_on: str | None = None,
+    action_items: Sequence[Any] = (),
 ) -> bytes:
     from app.docx_export import (
         add_heading,
@@ -822,7 +913,22 @@ def render_full_docx(
         add_paragraphs(doc, ["No gaps — every in-scope subcategory meets its target."])
 
     add_page_break(doc)
-    add_heading(doc, "6. Appendix — all subcategories")
+    add_heading(doc, "6. Action plan (POA&M)")
+    add_paragraphs(
+        doc,
+        [
+            "Owners and target dates for closing each gap. Maintained in-platform "
+            "so the plan travels with the deliverable."
+        ],
+    )
+    action_rows = _action_plan_rows(action_items)
+    if action_rows:
+        add_table(doc, ACTION_PLAN_HEADER, action_rows)
+    else:
+        add_paragraphs(doc, ["No action items recorded for this assessment yet."])
+
+    add_page_break(doc)
+    add_heading(doc, "7. Appendix — all subcategories")
     ordered_rows = sorted(enterprise_rows, key=lambda r: r.subcategory_code)
     table = add_table(
         doc,

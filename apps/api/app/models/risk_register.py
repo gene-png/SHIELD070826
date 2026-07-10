@@ -47,6 +47,17 @@ class RiskRegister(UUIDPKMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # FIX F-3 (July 9 decision): a formal Approve step that locks the register
+    # version. Export is refused until this is set; symmetric with every other
+    # service's approve gate. Mirrors csf/zt/attack approved_at + approved_by.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # FIX F-3 item 7: a snapshot of which assessments (kind, version, status)
+    # this version was synthesized from, captured at generate time so the
+    # dashboard + export can show provenance. JSON list of dicts.
+    sources: Mapped[list | None] = mapped_column(_JSON_LIST)
     # Newest current; older versions kept (superseded).
     superseded_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("risk_registers.id", ondelete="SET NULL")
@@ -100,3 +111,11 @@ class RiskEntry(UUIDPKMixin, TimestampMixin, Base):
     # Provenance (first-class + visible).
     origin: Mapped[str] = mapped_column(String(24), default="ai_generated", nullable=False)
     trust: Mapped[str | None] = mapped_column(String(32))
+
+    # FIX F-3: same C2 lock semantics as csf_answers/zt_answers/attack_coverage.
+    # A locked entry is carried forward verbatim on regenerate and never
+    # redrafted by the AI. Only unlocked entries are redrafted.
+    locked: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # FIX F-3: soft delete. A deleted entry disappears from the register view
+    # and every export, but the row is retained for the audit trail.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
