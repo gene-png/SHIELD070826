@@ -12,19 +12,19 @@
 
 All three sprints are complete. **44 of the document's 45 fixes are addressed and complete**; one (**B-6**) was already implemented before this engagement began and was deliberately skipped. H-6 was completed after the sprint close (see §8.2).
 
-|                     | Before             | After                                      |
-| ------------------- | ------------------ | ------------------------------------------ |
-| API tests           | 480 passed         | **626 passed, 14 skipped, 0 failed**       |
-| Live AI (real API)  | never run          | **14 passed** — 5/5 job prompts (§8.1)     |
+|                     | Before             | After                                                  |
+| ------------------- | ------------------ | ------------------------------------------------------ |
+| API tests           | 480 passed         | **626 passed, 14 skipped, 0 failed**                   |
+| Live AI (real API)  | never run          | **14 passed** — 5/5 job prompts (§8.1)                 |
 | Web tests           | 0                  | **8 Playwright specs** (5 click-path + 3 smoke), green |
-| `prettier --check`  | **17 files dirty** | clean repo-wide                            |
-| `next lint`         | **crashed**        | `✔ No ESLint warnings or errors`           |
-| `next dev` homepage | **HTTP 500**       | **HTTP 200**                               |
-| `tsc --noEmit`      | clean              | clean                                      |
-| `bandit` HIGH       | 0                  | 0                                          |
-| Alembic head        | `0028`             | `0035` (7 additive, reversible migrations) |
+| `prettier --check`  | **17 files dirty** | clean repo-wide                                        |
+| `next lint`         | **crashed**        | `✔ No ESLint warnings or errors`                       |
+| `next dev` homepage | **HTTP 500**       | **HTTP 200**                                           |
+| `tsc --noEmit`      | clean              | clean                                                  |
+| `bandit` HIGH       | 0                  | 0                                                      |
+| Alembic head        | `0028`             | `0035` (7 additive, reversible migrations)             |
 
-**160 files changed, +13,430 / −1,296.** 26 new test files. Nothing pushed to a remote.
+**169 files changed, +14,394 / −1,296.** 26 new API test files + 8 Playwright specs. Pushed to `origin/remediation/fable-plan`; `main` untouched, no PR opened.
 
 > **The most important number is not 626.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
 >
@@ -53,6 +53,7 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 | 1                | AI core · ZT · Risk · ATT&CK · CSF · Extraction/upload                              |
 | 2                | AI runtime · Web · Security/config · Extraction/storage · Routes/concurrency        |
 | 3                | Exporters · Docs/ops · Risk governance · CSF action plan · Nav/release/audit-viewer |
+| Post-sprint      | Playwright QA (click-path specs) — see §6.1                                         |
 
 **Eight subagents stalled** on background waiters and were stopped by the lead after their work was complete; **two died** on transient API/SSL errors mid-run. In every case the lead verified the claims directly rather than resuming blindly. No subagent's report was accepted without independent checking.
 
@@ -116,13 +117,13 @@ The plan's §10 finding was that the old suite reached workspaces via `page.goto
 
 All five specs navigate by clicking. Setup only ever creates an _empty_ service via the API; **no spec navigates to a workspace by id, and no spec sets the tenant cookie via the API.**
 
-| Spec                          | Fix       | What it clicks                                                                                        | Status                      |
-| ----------------------------- | --------- | ----------------------------------------------------------------------------------------------------- | --------------------------- |
-| `playbook-export-gate.spec.ts` | B-3       | Active Work → Open → Start assessment → Seed Profiles → Export XLSX                                   | GREEN (gate half; see below) |
-| `extraction-errors.spec.ts`    | C-1 / C-2 | Tech-Debt dropzone: header-only CSV, then `.xls`                                                       | GREEN                       |
-| `client-thread.spec.ts`        | D-1       | Client submits; admin replies; **client clicks the card** and reads the reply                          | GREEN                       |
-| `admin-switcher.spec.ts`       | D-2       | Fresh admin, no cookie → Risk Register nav → picks client in the **header switcher** (UI, not the API) | GREEN                       |
-| `simulated-badge.spec.ts`      | E-5       | AI status banner reads "simulated", not "disabled"                                                     | GREEN (banner half only)    |
+| Spec                           | Fix       | What it clicks                                                                                         | Status                       |
+| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| `playbook-export-gate.spec.ts` | B-3       | Active Work → Open → Start assessment → Seed Profiles → Export XLSX                                    | GREEN (gate half; see below) |
+| `extraction-errors.spec.ts`    | C-1 / C-2 | Tech-Debt dropzone: header-only CSV, then `.xls`                                                       | GREEN                        |
+| `client-thread.spec.ts`        | D-1       | Client submits; admin replies; **client clicks the card** and reads the reply                          | GREEN                        |
+| `admin-switcher.spec.ts`       | D-2       | Fresh admin, no cookie → Risk Register nav → picks client in the **header switcher** (UI, not the API) | GREEN                        |
+| `simulated-badge.spec.ts`      | E-5       | AI status banner reads "simulated", not "disabled"                                                     | GREEN (banner half only)     |
 
 **Verified by the lead, not taken on report.** The agent ran the suite with custom accounts because the local DB had drifted, so the state it proved green was **not** the state it asked me to commit. I repaired the drifted `admin@kentro.example` password, then re-ran the suite **as committed** (default seed accounts, no overrides): `8 passed` twice, plus a third run on the exact post-`prettier` bytes. I independently re-proved non-vacuity for D-2 by removing the switcher `selectOption` — the spec fails. Scanned for hidden weakening: **no `waitForTimeout`, no `test.skip`, no soft assertions, no `page.goto` into a deep workspace URL.**
 
@@ -301,8 +302,8 @@ In priority order.
 6. ~~Add the provider-level Haiku cap assertion~~ **DONE.** `max_output_tokens(model)` gives each model its real ceiling; an over-cap `max_tokens` now raises `LLMConfigurationError` naming the model and its limit rather than clamping (a clamp truncates mid-JSON — the A-3 defect). An unrecognised model id gets the _conservative_ 64K ceiling, so a future model fails safe. `test_every_pinned_job_fits_its_model_output_ceiling` guards the registry.
 7. ~~Write the e2e click-path specs the plan calls for~~ **DONE 2026-07-09** — five specs, all green, all click-driven (§6.1). The risk-governance flow remains unwritten.
 8. **Recover or rewrite the v2 Work Order** (§8.3). Forty-one files cite a document that does not exist.
-6. **Deal with the framework-majors bundle deliberately** — Next 15/16, React 19, Tailwind 4, Node 22 — as one pass, behind the e2e net that now exists. Close the open Dependabot PRs together rather than one at a time.
-7. **Auth enforcement package**, per D-017: refresh-token rotation and revocation first, then idle timeout, forced re-auth, MFA. The docs no longer claim these exist; the work is now scoped and homed.
+9. **Deal with the framework-majors bundle deliberately** — Next 15/16, React 19, Tailwind 4, Node 22 — as one pass, behind the e2e net that now exists. Close the open Dependabot PRs together rather than one at a time.
+10. **Auth enforcement package**, per D-017: refresh-token rotation and revocation first, then idle timeout, forced re-auth, MFA. The docs no longer claim these exist; the work is now scoped and homed.
 
 ---
 
