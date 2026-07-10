@@ -20,11 +20,12 @@ from collections.abc import Iterable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.ai.diff import diff_keyed_rows
-from app.ai.engine import run_job
+from app.ai.engine import preview_job_chunks, run_job
 from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.attack.analytics import compute as compute_heatmap
 from app.attack.catalog import (
@@ -563,7 +564,8 @@ def run_ai(
     client: Annotated[Client, Depends(current_client)],
     db: Annotated[Session, Depends(get_db)],
     llm: Annotated[LLMClient, Depends(_llm_dep)],
-) -> AttackRunAiResponse:
+    preview: bool = False,
+) -> AttackRunAiResponse | JSONResponse:
     """The ATT&CK 'Run AI'. Suggests coverage status + which listed tools provide
     Detection / Prevention / Response per technique, validating every cited tool
     against the client's capability list. AI suggests; locked rows are left
@@ -575,7 +577,7 @@ def run_ai(
     # provider calls (see app/db/locks.py).
     try:
         with run_lock(db, "attack_run_ai", svc.id):
-            return _attack_run_ai_locked(svc, user, client, db, llm)
+            return _attack_run_ai_locked(svc, user, client, db, llm, preview=preview)
     except RunInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -589,6 +591,8 @@ def _attack_run_ai_locked(
     client: Client,
     db: Session,
     llm: LLMClient,
+    *,
+    preview: bool = False,
 ) -> AttackRunAiResponse:
     # FIX F-2: create the draft (seeding rows) on first Run AI when none exists,
     # exactly what "Start assessment" does. The open-draft guard (E-3) keeps this
@@ -651,6 +655,17 @@ def _attack_run_ai_locked(
     # args doesn't reload + re-check-out a connection.
     run_uid, run_sid, run_cid = user.id, svc.id, client.id
     batches = _chunk_by_tactic(sorted(rows))
+    # FIX H-6: dry run. mitre_map is chunked per tactic; preview every batch
+    # that would egress, because the union is what leaves the platform.
+    # No provider call, no llm_calls row.
+    if preview:
+        return JSONResponse(
+            preview_job_chunks(
+                "mitre_map",
+                chunks=[{"capability_list": tools, "technique_codes": b} for b in batches],
+                client_org_name=client_org,
+            )
+        )
     db.rollback()
     suggestions: list[Any] = []
     # FIX E-4 accumulators: mitre_map is chunked per tactic, so each batch

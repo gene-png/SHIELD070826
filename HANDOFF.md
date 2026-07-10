@@ -10,18 +10,18 @@
 
 ## 1. Summary
 
-All three sprints are complete. 44 of the document's 45 fixes are addressed; one (**B-6**) was already implemented before this engagement began and was deliberately skipped. One (**H-6**) is partial and explicitly labelled as such.
+All three sprints are complete. **44 of the document's 45 fixes are addressed and complete**; one (**B-6**) was already implemented before this engagement began and was deliberately skipped. H-6 was completed after the sprint close (see §8.2).
 
 |                     | Before             | After                                      |
 | ------------------- | ------------------ | ------------------------------------------ |
-| API tests           | 480 passed         | **619 passed, 8 skipped, 0 failed**        |
+| API tests           | 480 passed         | **625 passed, 8 skipped, 0 failed**        |
 | Web tests           | 0                  | e2e harness (Playwright, in Docker)        |
 | `prettier --check`  | **17 files dirty** | clean repo-wide                            |
 | `next lint`         | **crashed**        | `✔ No ESLint warnings or errors`           |
 | `next dev` homepage | **HTTP 500**       | **HTTP 200**                               |
 | `tsc --noEmit`      | clean              | clean                                      |
 | `bandit` HIGH       | 0                  | 0                                          |
-| Alembic head        | `0028`             | `0034` (6 additive, reversible migrations) |
+| Alembic head        | `0028`             | `0035` (7 additive, reversible migrations) |
 
 **156 files changed, +12,444 / −1,289.** 26 new test files. Nothing pushed to a remote.
 
@@ -66,7 +66,7 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 | `apps/api/app/{csf,zt,attack,risk,tech_debt}/` | Exporters (full gap lists, roadmap, 5×5 matrix, Action Plan); parsers (multi-sheet, tolerant numerics); storage timeouts                                                             |
 | `apps/api/app/middleware/`                     | `ratelimit.py` (Redis fixed-window, fails open, off by default)                                                                                                                      |
 | `apps/web/src/`                                | Client detail pages; admin `ClientSwitcher`; real error messages; `AbortSignal` + Cancel; Simulated badge; Active Work; audit viewer; `/dev` auth gate                               |
-| `alembic/versions/`                            | `0029`–`0034`, all additive and reversible                                                                                                                                           |
+| `alembic/versions/`                            | `0029`–`0035`, all additive and reversible                                                                                                                                           |
 | `infra/backup/`, `docs/runbooks/`              | `backup.sh`, `restore.sh`, `restore-drill.sh`, `backup-restore.md`                                                                                                                   |
 | `e2e/`                                         | Playwright config + smoke spec, running in Docker                                                                                                                                    |
 | `.github/workflows/ci.yml`                     | e2e job; restore-drill job                                                                                                                                                           |
@@ -78,11 +78,11 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 
 Every sprint was gated on a **full suite against a quiescent tree** — no result taken while an agent (or the lead) was mid-edit.
 
-- `python -m pytest` → **619 passed, 8 skipped, 0 failed**
+- `python -m pytest` → **625 passed, 8 skipped, 0 failed**
 - `ruff check app tests` → clean
 - `black --check app tests alembic` → clean, 225 files
 - `bandit -c pyproject.toml -r app` → **High: 0** (2 pre-existing Mediums, reduced to 1)
-- `alembic upgrade head → downgrade → upgrade` for each of `0029`–`0034` → reversible
+- `alembic upgrade head → downgrade → upgrade` for each of `0029`–`0035` → reversible
 - Migrations applied against **real Postgres** in the container, not only SQLite
 - `prettier --check "**/*.{ts,tsx,js,jsx,json,md,yml,yaml}"` → clean
 - `pnpm -F web typecheck` (`tsc --noEmit`) → zero errors
@@ -146,9 +146,13 @@ SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live ANTHROPIC_API_KEY=sk-... \
 
 The 8 skipped tests become 8 real calls. The gate was verified to arm correctly with a dummy key.
 
-### 8.2 H-6 is partial
+### 8.2 H-6 — CLOSED (was partial; completed after sprint close)
 
-`preview_job_payload()` is generic across all five jobs and wired to the **ZT** run-ai endpoint (`?preview=true`), proven to make no provider call and write no `llm_calls` row. **Not done:** wiring CSF and ATT&CK (mechanical — same helper, same insertion point, right after the payload is materialised and before `db.rollback()`), and the one-time per-client acknowledgment gate before the first live run (needs a column + migration).
+Preview is wired to **ZT, CSF and ATT&CK**. `csf_score` (per tier) and `mitre_map` (per tactic) are chunked, so their preview returns **every chunk**: the union is what egresses, and showing only the first would understate it — a comforting half-truth in the one tool whose purpose is showing egress.
+
+The one-time per-client acknowledgment gate lives **inside `LLMClient.invoke`**, which the codebase itself declares "the ONLY path that calls an external AI provider". Gating there covers every job, including jobs written after the gate exists. It raises `RedactionAckRequiredError` → typed **409** with instructions, **before** the RUNNING audit row is committed and before `provider.complete`: nothing leaves, and nothing is recorded as having tried to. Fixture mode is exempt by construction (nothing egresses), which is why the 625-test suite does not 409 — asserted explicitly, not inferred.
+
+`POST /admin/clients/{id}/redaction-preview-ack` records it. Once per client, not per run: the point is that a human reviewed redaction quality on real client data, not that an operator dismisses a modal on every job. Idempotent — re-acknowledging preserves the original timestamp, so the audit trail shows when review first happened. Migration `0035`.
 
 ### 8.3 The v2 Work Order does not exist
 
@@ -210,8 +214,8 @@ All three are aligned to the Next-14 / React-18 line, the lockfile is regenerate
 In priority order.
 
 1. **Supply an `ANTHROPIC_API_KEY` and run the live smoke test.** Everything else is inference until a real call succeeds on all five jobs. One command, already written (§8.1). _This is the highest-value hour available._
-2. **Finish H-6.** Wire the preview helper into the CSF and ATT&CK run-ai endpoints; add the one-time per-client acknowledgment gate. Live mode should not egress client data for a tenant whose redaction nobody has reviewed.
-3. **Add the provider-level Haiku cap assertion** so a future per-job model pin cannot silently exceed 64K output.
+2. ~~Finish H-6~~ **DONE** (§8.2).
+3. ~~Add the provider-level Haiku cap assertion~~ **DONE.** `max_output_tokens(model)` gives each model its real ceiling; an over-cap `max_tokens` now raises `LLMConfigurationError` naming the model and its limit rather than clamping (a clamp truncates mid-JSON — the A-3 defect). An unrecognised model id gets the _conservative_ 64K ceiling, so a future model fails safe. `test_every_pinned_job_fits_its_model_output_ceiling` guards the registry.
 4. **Write the e2e click-path specs the plan calls for** — the playbook export gate, extraction errors, the client message thread, the admin switcher, the risk governance flow. The unit tests prove the behaviour; these prove the _user_ can reach it. Then flip `e2e` and `restore-drill` to blocking.
 5. **Recover or rewrite the v2 Work Order** (§8.3). Forty-one files cite a document that does not exist.
 6. **Deal with the framework-majors bundle deliberately** — Next 15/16, React 19, Tailwind 4, Node 22 — as one pass, behind the e2e net that now exists. Close the open Dependabot PRs together rather than one at a time.
@@ -223,14 +227,14 @@ In priority order.
 
 ```bash
 # API
-cd apps/api && python -m pytest            # 619 passed, 8 skipped, 0 failed
+cd apps/api && python -m pytest            # 625 passed, 8 skipped, 0 failed
 python -m ruff check app tests             # clean
 python -m black --check app tests alembic  # clean
 python -m bandit -q -c pyproject.toml -r app   # High: 0
 
 # Migrations (absolute sqlite URL)
 DATABASE_URL="sqlite:///C:/tmp/x.db" python -m alembic upgrade head
-DATABASE_URL="sqlite:///C:/tmp/x.db" python -m alembic downgrade -6
+DATABASE_URL="sqlite:///C:/tmp/x.db" python -m alembic downgrade -7
 DATABASE_URL="sqlite:///C:/tmp/x.db" python -m alembic upgrade head
 
 # Web (in Docker; no host pnpm needed)

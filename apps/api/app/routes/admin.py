@@ -298,6 +298,52 @@ def deactivate_user(
 
 
 @router.post(
+    "/clients/{client_id}/redaction-preview-ack",
+    summary="Acknowledge that this client's redacted AI payload was reviewed (admin)",
+)
+def acknowledge_redaction_preview(
+    client_id: uuid.UUID,
+    admin: Annotated[User, _admin_required],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """FIX H-6: record that a human looked at what would egress, once per tenant.
+
+    The spec promises the consultant can see what leaves the platform. The
+    preview endpoints (``run-ai?preview=true``) answer that question; this
+    records that somebody actually asked it, before the first live call.
+
+    Deliberately once per client, not per run: the point is that redaction
+    quality was reviewed on real client data, not that an operator clicks
+    through a modal on every job. Idempotent -- re-acknowledging keeps the
+    original timestamp, so the audit trail shows when review first happened.
+    """
+    tenant = db.get(Client, client_id)
+    if tenant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found.")
+
+    if tenant.redaction_preview_ack_at is None:
+        tenant.redaction_preview_ack_at = utcnow()
+        tenant.redaction_preview_ack_by = admin.id
+        audit(
+            db,
+            action="client.redaction_preview_acknowledged",
+            target_type="client",
+            target_id=tenant.id,
+            actor_user_id=admin.id,
+            details={},
+        )
+        db.commit()
+
+    return {
+        "client_id": str(tenant.id),
+        "redaction_preview_ack_at": tenant.redaction_preview_ack_at.isoformat(),
+        "redaction_preview_ack_by": (
+            str(tenant.redaction_preview_ack_by) if tenant.redaction_preview_ack_by else None
+        ),
+    }
+
+
+@router.post(
     "/users/{user_id}/reactivate",
     response_model=AdminUserDetail,
     summary="Reactivate a deactivated user account (admin)",

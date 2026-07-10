@@ -40,6 +40,37 @@ class LLMConfigurationError(RuntimeError):
     call — e.g. live mode selected but the provider SDK cannot be imported."""
 
 
+class RedactionAckRequiredError(RuntimeError):
+    """Live egress attempted for a tenant whose redacted payload was never
+    reviewed (FIX H-6). Routes map this to a typed 409 with instructions.
+
+    Deliberately raised *before* the RUNNING audit row is committed and before
+    any provider call: nothing leaves the platform, and nothing is recorded as
+    having tried to."""
+
+
+# Maximum OUTPUT tokens per model. Not a style preference: exceeding a model's
+# ceiling is rejected by the API, and a job that silently clamps truncates its
+# response mid-JSON. Haiku is the one that bites -- it caps at 64K while the
+# full ATT&CK map needs ~65K, which is why `mitre_map` and `csf_score` are
+# chunked before being pinned to it (FIX A-3).
+_MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "claude-haiku-4-5": 64_000,
+    "claude-sonnet-5": 128_000,
+    "claude-sonnet-4-6": 128_000,
+    "claude-opus-4-7": 128_000,
+    "claude-opus-4-8": 128_000,
+}
+# Conservative default for a model we don't know about: assume the smallest
+# ceiling we've seen rather than the largest, so an unrecognised id fails safe.
+_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS = 64_000
+
+
+def max_output_tokens(model: str) -> int:
+    """The model's maximum output tokens; conservative for unknown ids."""
+    return _MODEL_MAX_OUTPUT_TOKENS.get(model, _UNKNOWN_MODEL_MAX_OUTPUT_TOKENS)
+
+
 class LLMTimeoutError(RuntimeError):
     """The provider call timed out or the connection failed (FIX E-1b). Routes
     map this to a typed 504; the audit row is still written FAILED and nothing
@@ -182,12 +213,25 @@ class AnthropicProvider:
         # already run upstream, so this content is safe to egress.
         import json
 
-        # Per-job overrides fall back to the provider default. 128000 is the
-        # configured-default model's max output and gives the full ATT&CK map
-        # (~65K tokens even when terse) headroom so it never truncates mid-JSON;
-        # a job may pin a smaller cap (e.g. a chunked Haiku job under its 64K).
+        # Per-job overrides fall back to the model's own output ceiling rather
+        # than a blanket 128000. Haiku 4.5 caps at 64K, and the full ATT&CK map
+        # is ~65K output tokens even when terse -- so an un-capped Haiku job
+        # would be rejected by the API, or (worse, on a model that clamps)
+        # truncate mid-JSON. That is exactly the defect FIX A-3 exists to close,
+        # and it is one careless `model=` away from returning. Fail loudly.
         effective_model = model or self.model
-        effective_max_tokens = max_tokens or 128000
+        ceiling = max_output_tokens(effective_model)
+        if max_tokens is None:
+            effective_max_tokens = ceiling
+        elif max_tokens > ceiling:
+            raise LLMConfigurationError(
+                f"max_tokens={max_tokens} exceeds the maximum output of "
+                f"{effective_model!r} ({ceiling}). Lower the job's max_tokens, or "
+                f"chunk the job so each call fits. Silently clamping would truncate "
+                f"the response mid-JSON."
+            )
+        else:
+            effective_max_tokens = max_tokens
 
         # STREAM the response. A large job (e.g. the full 600+ technique MITRE
         # ATT&CK map) needs a big max_tokens, and a non-streaming request that
@@ -333,6 +377,22 @@ class LLMClient:
             if resolved_client_id is None and service_id is not None:
                 svc = log_db.get(Service, service_id)
                 resolved_client_id = svc.client_id if svc is not None else None
+
+            # FIX H-6: the first LIVE egress for a tenant requires a recorded
+            # acknowledgment that an admin previewed the redacted payload. This
+            # is the ONLY path to a provider, so gating here covers every job --
+            # including ones written after this comment. Fixture mode is exempt:
+            # nothing leaves the platform.
+            if call_mode is LLMCallMode.LIVE and resolved_client_id is not None:
+                from app.models.client import Client as _Client
+
+                tenant = log_db.get(_Client, resolved_client_id)
+                if tenant is not None and tenant.redaction_preview_ack_at is None:
+                    raise RedactionAckRequiredError(
+                        "This client's redacted AI payload has not been reviewed. "
+                        "Preview what would be sent (run-ai?preview=true), then "
+                        "acknowledge it once for this client, before running live AI."
+                    )
 
             row = LLMCall(
                 service_id=service_id,

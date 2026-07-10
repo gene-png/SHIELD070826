@@ -25,11 +25,12 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.diff import diff_keyed_rows
-from app.ai.engine import run_job
+from app.ai.engine import preview_job_chunks, run_job
 from app.ai.llm import LLMClient, LLMConfigurationError, LLMTimeoutError
 from app.audit import audit
 from app.csf import playbook_export as csf_playbook_export
@@ -1115,7 +1116,8 @@ def run_ai(
     client: Annotated[Client, Depends(current_client)],
     db: Annotated[Session, Depends(get_db)],
     llm: Annotated[LLMClient, Depends(_llm_dep)],
-) -> CsfRunAiResponse:
+    preview: bool = False,
+) -> CsfRunAiResponse | JSONResponse:
     """The CSF full-Playbook 'Run AI'. Suggests the five dimension scores (0-2)
     + a 'what we found' narrative per (tier, subcategory). AI suggests; locked
     rows are untouched; code does the total/level/cap + Enterprise roll-up.
@@ -1127,7 +1129,7 @@ def run_ai(
     # E-1 does before the provider call — see app/db/locks.py.
     try:
         with run_lock(db, "csf_run_ai", svc.id):
-            return _csf_run_ai_locked(svc, user, client, db, llm)
+            return _csf_run_ai_locked(svc, user, client, db, llm, preview=preview)
     except RunInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1141,7 +1143,9 @@ def _csf_run_ai_locked(
     client: Client,
     db: Session,
     llm: LLMClient,
-) -> CsfRunAiResponse:
+    *,
+    preview: bool = False,
+) -> CsfRunAiResponse | JSONResponse:
     a = _latest_assessment(db, svc.id)
     if a is None:
         raise HTTPException(
@@ -1238,6 +1242,19 @@ def _csf_run_ai_locked(
     # Capture the ids BEFORE rollback: db.rollback() expires these ORM objects,
     # so reading .id afterwards would reload them and re-check-out a connection
     # for the whole provider call — defeating the release.
+    # FIX H-6: a dry run. csf_score is chunked per tier, so preview every
+    # chunk that would egress -- the union is what leaves the platform, and
+    # showing only the first would understate it. No provider call, no
+    # llm_calls row: nothing leaves.
+    if preview:
+        return JSONResponse(
+            preview_job_chunks(
+                "csf_score",
+                chunks=[chunk_inputs[t] for t in sorted(chunk_inputs)],
+                client_org_name=client_org,
+            )
+        )
+
     run_uid, run_sid, run_cid = user.id, svc.id, client.id
     db.rollback()
 

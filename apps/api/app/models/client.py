@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, DateTime, String, Text
+from sqlalchemy import ARRAY, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,16 @@ class Client(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "client"
 
     legal_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # FIX H-6: the first LIVE AI run for a tenant requires a recorded
+    # acknowledgment that an admin previewed the redacted payload. Once per
+    # client, never per run -- the point is that somebody looked at real client
+    # data before it egressed, which is both the Master Spec's promise (§12) and
+    # the first question a FedRAMP assessor asks. NULL = never acknowledged.
+    redaction_preview_ack_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    redaction_preview_ack_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     dba_name: Mapped[str | None] = mapped_column(String(255))
     website: Mapped[str | None] = mapped_column(String(512))
     size_band: Mapped[str | None] = mapped_column(String(64))

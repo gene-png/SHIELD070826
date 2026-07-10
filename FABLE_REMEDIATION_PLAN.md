@@ -737,7 +737,7 @@ Each bump looks innocuous in a PR diff — a version number, and the Python suit
 
 **Still open, and not claimed as done:**
 
-1. **H-6 is partial.** The preview helper is generic across all five jobs and wired to ZT. CSF and ATT&CK are not wired, and the one-time per-client acknowledgment gate before the first live run is not implemented.
+1. ~~**H-6 is partial.**~~ **CLOSED 2026-07-09.** The preview is wired to ZT, CSF and ATT&CK — the two chunked jobs preview _every_ chunk, because the union is what egresses and showing only the first would understate it. The one-time per-client acknowledgment gate is implemented **inside `LLMClient.invoke`**, the codebase's own declared "ONLY path that calls an external AI provider", so every job is covered including ones written after the gate. It runs before the RUNNING audit row is committed and before `provider.complete`: nothing leaves, and nothing is recorded as having tried to. Fixture mode is exempt by construction. Migration `0035`.
 2. **Live AI is unproven against the real API.** No `ANTHROPIC_API_KEY`. The gated live smoke test arms the moment a key exists. No live Claude call has been made and none is claimed.
 3. **`PublicHeader` makes a server-side `/intake` fetch on every authenticated non-admin render.** Guarded and fails closed, but it deserves caching.
 4. **The v2 Work Order does not exist in the repository.** `find . -iname "*work*order*"` returns nothing, yet **41 files under `apps/api/app` cite it** as the spec for the A–F changes. It cannot be invented, and it is a real risk to the next maintainer.

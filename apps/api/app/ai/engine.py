@@ -165,6 +165,58 @@ def preview_job_payload(
     }
 
 
+def preview_job_chunks(
+    job_name: str,
+    *,
+    chunks: list[dict[str, Any]],
+    settings: Any | None = None,
+    client_org_name: str | None = None,
+    name_hints: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Preview a CHUNKED job: every chunk that would egress, redacted.
+
+    FIX H-6. ``mitre_map`` and ``csf_score`` are chunked (per tactic / per tier),
+    so a single-payload preview would answer the wrong question: what leaves the
+    platform is the UNION of every chunk, not the first one. Showing only chunk
+    zero would understate the egress, which is exactly the kind of comforting
+    half-truth this fix exists to eliminate.
+
+    Redacts each chunk independently -- the same way the real run does, one
+    ``LLMClient.invoke`` per chunk -- and reports the aggregate removal counts
+    alongside the per-chunk payloads. Makes NO provider call and writes NO
+    ``llm_calls`` row.
+    """
+    from app.ai.redact import redact_payload
+    from app.config import get_settings
+
+    s = settings or get_settings()
+    job = get_job(job_name)
+
+    redacted: list[Any] = []
+    totals: dict[str, int] = {}
+    for chunk in chunks:
+        cleaned, removed = redact_payload(
+            chunk,
+            mode=s.shield_redaction_mode,
+            client_org_name=client_org_name,
+            name_hints=tuple(name_hints),
+        )
+        redacted.append(cleaned)
+        for rule, n in (removed or {}).items():
+            totals[rule] = totals.get(rule, 0) + n
+
+    return {
+        "job": job.name,
+        "model": job.model or s.shield_llm_model,
+        "prompt": job.prompt,
+        "chunk_count": len(redacted),
+        "redacted_chunks": redacted,
+        "redaction_counts": totals,
+        "redacted_total": sum(totals.values()),
+        "payload_bytes": sum(len(json.dumps(c)) for c in redacted),
+    }
+
+
 def parse_json(content: str) -> Any:
     """Best-effort JSON parse of an LLM response, tolerating ```json fences."""
     text = content.strip()

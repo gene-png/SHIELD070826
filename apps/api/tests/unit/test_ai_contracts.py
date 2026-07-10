@@ -202,3 +202,49 @@ def test_tech_debt_shape_declares_the_keys_the_extractor_reads() -> None:
     assert '"items"' in TECH_DEBT_EXTRACT_SHAPE
     for field in ("name", "vendor", "annual_cost_usd", "license_count", "confidence_pct"):
         assert field in TECH_DEBT_EXTRACT_SHAPE
+
+
+# --- per-model output ceilings (A-3 / X-1) ---------------------------------
+
+
+def test_every_pinned_job_fits_its_model_output_ceiling() -> None:
+    """A per-job model pin must never request more output than the model allows.
+
+    Haiku 4.5 caps at 64K output while the full ATT&CK map is ~65K tokens even
+    when terse. Pinning `mitre_map` to Haiku without chunking (and without a
+    cap under 64K) would be rejected by the API -- or, on a provider that
+    clamps, would truncate the response mid-JSON. That is precisely the defect
+    FIX A-3 exists to close, and it is one careless `model=` away from
+    returning. This test is the guard.
+    """
+    from app.ai.llm import max_output_tokens
+
+    for name in registered_jobs():
+        job = get_job(name)
+        if job.model is None:
+            continue  # inherits the env default; checked at call time
+        ceiling = max_output_tokens(job.model)
+        requested = job.max_tokens if job.max_tokens is not None else ceiling
+        assert requested <= ceiling, (
+            f"job {name!r} is pinned to {job.model!r} (max output {ceiling}) but "
+            f"requests max_tokens={requested}; it would truncate or be rejected"
+        )
+
+
+def test_unknown_model_gets_the_conservative_ceiling() -> None:
+    """An unrecognised model id must fail safe (assume the small ceiling)."""
+    from app.ai.llm import max_output_tokens
+
+    assert max_output_tokens("claude-haiku-4-5") == 64_000
+    assert max_output_tokens("claude-sonnet-5") == 128_000
+    assert max_output_tokens("some-model-released-after-this-code-was-written") == 64_000
+
+
+def test_provider_refuses_max_tokens_above_the_model_ceiling() -> None:
+    """Fail loudly, never clamp: a clamp truncates the response mid-JSON."""
+    import pytest as _pytest
+    from app.ai.llm import AnthropicProvider, LLMConfigurationError
+
+    provider = AnthropicProvider(model="claude-haiku-4-5", api_key="sk-fake")
+    with _pytest.raises(LLMConfigurationError, match="exceeds the maximum output"):
+        provider.complete("p", {}, max_tokens=128_000)

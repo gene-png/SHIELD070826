@@ -69,7 +69,24 @@ async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _handle_redaction_ack_required(request: Request, exc: Exception) -> JSONResponse:
+    """FIX H-6: live egress before anyone reviewed the redacted payload.
+
+    A typed 409 with instructions, not a generic 500. The message tells the
+    operator exactly what to do: preview, then acknowledge, then run.
+    """
+    cid = _correlation_id_from(request)
+    return JSONResponse(
+        status_code=409,
+        content={"error": {"code": 409, "message": str(exc), "correlation_id": cid}},
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
+    from app.ai.llm import RedactionAckRequiredError
+
     app.add_exception_handler(HTTPException, _handle_http_exception)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
+    # Registered BEFORE the catch-all so it wins over _handle_unexpected.
+    app.add_exception_handler(RedactionAckRequiredError, _handle_redaction_ack_required)
     app.add_exception_handler(Exception, _handle_unexpected)
