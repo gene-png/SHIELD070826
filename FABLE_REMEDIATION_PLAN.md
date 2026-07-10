@@ -207,16 +207,16 @@ Every fix from the source document, with its **verified** status. `→` marks a 
 
 Surfaced by the audit; these are mine, not the document's.
 
-| ID      | Sev    | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **X-1** | HIGH   | **Haiku's 64K output cap collides with `max_tokens=128000`.** Routing `mitre_map` to `claude-haiku-4-5` (Section 8 decision) before A-3 chunking lands will 400 or truncate. **A-3 must precede the model split.** (§0.6)                                                                                                                                                                                                                                                                 |
-| **X-2** | HIGH   | **No e2e harness exists at all.** Plan steps that say "extend the e2e spec" have nothing to extend. Bootstrapping Playwright is a prerequisite, not a sub-task. (§0.4)                                                                                                                                                                                                                                                                                                                    |
-| **X-3** | MEDIUM | **`E-3`'s premise is inverted.** The plan says to copy CSF's open-draft guard to ZT/ATT&CK. **CSF has no such guard.** All three must be written.                                                                                                                                                                                                                                                                                                                                         |
-| **X-4** | MEDIUM | **`B-6` is already implemented.** Acting on the document verbatim would have produced a redundant, conflict-prone rewrite of `tech_debt/exporters.py`.                                                                                                                                                                                                                                                                                                                                    |
-| **X-5** | MEDIUM | **`C-1`'s marquee defect does not exist here.** No fabrication fixture. Writing the plan's fix (2) would edit a file that isn't in the tree.                                                                                                                                                                                                                                                                                                                                              |
-| **X-6** | LOW    | **No `.env`; no API key.** Live-mode validation is impossible until supplied. (§0.5) — **RESOLVED**: key supplied 2026-07-09; live lane run; see X-7.                                                                                                                                                                                                                                                                                                                                     |
-| **X-7** | HIGH   | **The outgoing payload block was unlabeled, and Haiku ignored it.** `complete()` sent `json.dumps(payload)` as a bare second text block. `claude-haiku-4-5` — the pinned model for **both** `csf_score` and `mitre_map` — did not connect it to the prompt and replied in prose; `parse_json` raised on char 0. Live production path for two of five jobs. **Structurally invisible to fixture mode, which never builds a request.** Found by the live lane on its first real run. (§F.2) |
-| **X-8** | HIGH   | **Fixture mode is non-functional in the running app.** `_build_provider` (`llm.py:296-297`) returns a bare `FixtureProvider()`; nothing outside the pytest suite ever calls `.register()`. Every Run-AI / extract raises `KeyError: No fixture registered for purpose=...` → 500. `docker compose up` defaults to `SHIELD_LLM_MODE=fixture`, so **a fresh stack has no working AI at all**. Found by the e2e agent; confirmed directly. (§F.3)                                            |
+| ID      | Sev    | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **X-1** | HIGH   | **Haiku's 64K output cap collides with `max_tokens=128000`.** Routing `mitre_map` to `claude-haiku-4-5` (Section 8 decision) before A-3 chunking lands will 400 or truncate. **A-3 must precede the model split.** (§0.6)                                                                                                                                                                                                                                                                              |
+| **X-2** | HIGH   | **No e2e harness exists at all.** Plan steps that say "extend the e2e spec" have nothing to extend. Bootstrapping Playwright is a prerequisite, not a sub-task. (§0.4)                                                                                                                                                                                                                                                                                                                                 |
+| **X-3** | MEDIUM | **`E-3`'s premise is inverted.** The plan says to copy CSF's open-draft guard to ZT/ATT&CK. **CSF has no such guard.** All three must be written.                                                                                                                                                                                                                                                                                                                                                      |
+| **X-4** | MEDIUM | **`B-6` is already implemented.** Acting on the document verbatim would have produced a redundant, conflict-prone rewrite of `tech_debt/exporters.py`.                                                                                                                                                                                                                                                                                                                                                 |
+| **X-5** | MEDIUM | **`C-1`'s marquee defect does not exist here.** No fabrication fixture. Writing the plan's fix (2) would edit a file that isn't in the tree.                                                                                                                                                                                                                                                                                                                                                           |
+| **X-6** | LOW    | **No `.env`; no API key.** Live-mode validation is impossible until supplied. (§0.5) — **RESOLVED**: key supplied 2026-07-09; live lane run; see X-7.                                                                                                                                                                                                                                                                                                                                                  |
+| **X-7** | HIGH   | **The outgoing payload block was unlabeled, and Haiku ignored it.** `complete()` sent `json.dumps(payload)` as a bare second text block. `claude-haiku-4-5` — the pinned model for **both** `csf_score` and `mitre_map` — did not connect it to the prompt and replied in prose; `parse_json` raised on char 0. Live production path for two of five jobs. **Structurally invisible to fixture mode, which never builds a request.** Found by the live lane on its first real run. (§F.2)              |
+| **X-8** | HIGH   | **Fixture mode is non-functional in the running app.** `_build_provider` (`llm.py:296-297`) returns a bare `FixtureProvider()`; nothing outside the pytest suite ever calls `.register()`. Every Run-AI / extract raises `KeyError: No fixture registered for purpose=...` → 500. `docker compose up` defaults to `SHIELD_LLM_MODE=fixture`, so **a fresh stack has no working AI at all**. Found by the e2e agent; confirmed directly. (§F.3) — **RESOLVED 2026-07-10 (commit `0fe0837`, Sprint A).** |
 
 ### F.2 — X-7 in detail: the bug only a real call could find
 
@@ -309,11 +309,36 @@ evaluating this platform without an API key sees an app whose central feature
 does not work. Not a regression from this engagement — it predates it, and no
 test could see it because every test registers its own fixtures first.
 
-**Not fixed here.** The fix is to register per-purpose canned responses in the
-application (shaped by `app/ai/schemas.py`, so they cannot drift from the
-prompts), which is new feature work, not remediation of a listed fix. It is the
-top item of the recommended next sprint. Deliberately **not** bundled into the
-e2e commit.
+**RESOLVED — Sprint A, 2026-07-10 (commit `0fe0837`).** New `app/ai/fixtures.py`
+registers a grounded builder per purpose, wired into `_build_provider`'s fixture
+branch (not `FixtureProvider.__init__` — a bare provider must still raise; a test
+depends on that). The line that governs every builder is the anti-fabrication
+one: every ENTITY in a response is echoed from the payload (subcategory /
+capability / technique codes, tool names, source ids), and every non-entity value
+is a fixed, visibly `[SIMULATED]` constant. The ATT&CK map marks every technique
+`gap` rather than inventing coverage; the extractor reads names from each row's
+own cells and skips blanks. So the two conclusions above that depended on the bug
+now flip: **G-3's demo guard finally guards a mode that works**, and **E-5's
+"Simulated" badge is reachable** (a fixture run now succeeds).
+
+The in-container proof is the exact inverse of the repro above:
+
+```
+registered fixtures: ['csf_score', 'extract.capabilities', 'mitre_map',
+                      'risk_synthesize', 'zt_score']
+  csf_score OK · zt_score OK · mitre_map OK · risk_synthesize OK ·
+  extract.capabilities OK   (each parsed by its own production parser)
+```
+
+14 new tests (`tests/unit/test_x8_fixture_mode.py`) cover grounding,
+shape-conformance, determinism, anti-fabrication, and the CSF route end-to-end;
+non-vacuity is proven by the route 500-ing with a bare provider and 200-ing with
+the defaults. 640 passed, 14 skipped, 0 failed.
+
+The `app/ai/schemas.py` shapes are honored by construction: each builder emits
+JSON its job's own parser accepts, and the A-6 contract tests already bind those
+parsers to the shapes — so a fixture cannot drift from a prompt without a red
+test.
 
 ---
 

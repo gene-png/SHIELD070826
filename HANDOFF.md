@@ -1,6 +1,6 @@
 # SHIELD Remediation — Handoff
 
-**Branch:** `remediation/fable-plan` (15 commits, pushed to `origin`)
+**Branch:** `remediation/fable-plan` (16 commits; through `3a81b2a` pushed, Sprint A `0fe0837` local)
 **Base:** `main` @ `474729d`
 **Date:** 2026-07-09
 **Source document:** `SHIELD_Remediation_Plan_2.docx` (Revision 3) — 45 fixes across 8 workstreams
@@ -14,7 +14,7 @@ All three sprints are complete. **44 of the document's 45 fixes are addressed an
 
 |                     | Before             | After                                                  |
 | ------------------- | ------------------ | ------------------------------------------------------ |
-| API tests           | 480 passed         | **626 passed, 14 skipped, 0 failed**                   |
+| API tests           | 480 passed         | **640 passed, 14 skipped, 0 failed**                   |
 | Live AI (real API)  | never run          | **14 passed** — 5/5 job prompts (§8.1)                 |
 | Web tests           | 0                  | **8 Playwright specs** (5 click-path + 3 smoke), green |
 | `prettier --check`  | **17 files dirty** | clean repo-wide                                        |
@@ -24,22 +24,23 @@ All three sprints are complete. **44 of the document's 45 fixes are addressed an
 | `bandit` HIGH       | 0                  | 0                                                      |
 | Alembic head        | `0028`             | `0035` (7 additive, reversible migrations)             |
 
-**169 files changed, +14,394 / −1,296.** 26 new API test files + 8 Playwright specs. Pushed to `origin/remediation/fable-plan`; `main` untouched, no PR opened.
+**169 files changed, +14,394 / −1,296** through the pushed tip; Sprint A adds `app/ai/fixtures.py` + 14 tests on top. `main` untouched, no PR opened.
 
-> **The most important number is not 626.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
+> **The most important number is not 640.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
 >
-> The live lane is the sharpest illustration. It was scaffolded in Sprint 0 and skipped for the entire engagement. The moment a real key armed it, it found a live-mode defect in two of the five AI jobs (§8.1) that the 626 offline tests were structurally unable to see. **Green offline is not evidence that the real path works.**
+> The live lane is the sharpest illustration. It was scaffolded in Sprint 0 and skipped for the entire engagement. The moment a real key armed it, it found a live-mode defect in two of the five AI jobs (§8.1) that the offline tests were structurally unable to see. **Green offline is not evidence that the real path works.**
 
 ---
 
 ## 2. Sprints completed
 
-| Sprint                                  | Goal                                                              | Commits                         | Result                                                                           |
-| --------------------------------------- | ----------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
-| **0 — Validation harness**              | Make it possible to _prove_ anything                              | `2d4a7d4`                       | Playwright bootstrapped in Docker; gated live-AI smoke test armed                |
-| **1 — Trustworthy core**                | No fabricated data; no deliverable that contradicts its dashboard | `5e49c5c`, `cc36aeb`            | A-2, A-3, A-4, B-1, B-2, B-3, C-1, C-2, G-2 (+A-1)                               |
-| **2 — Solid operations**                | Bounded, audited, guarded runtime                                 | `32d7a05`, `358c4ed`, `dbad444` | A-5, A-6, C-3–C-8, D-1–D-3, E-1–E-5, F-1, F-2, G-3, H-2, H-5, E-4, H-6 (partial) |
-| **3 — Complete deliverables and truth** | Exports contain what the dashboard promises; docs stop lying      | `908621c`, `fb0b137`            | B-4, B-5, B-7, D-4, E-6, F-3, G-1, H-1, H-3, H-4, H-7, H-8                       |
+| Sprint                                  | Goal                                                                    | Commits                         | Result                                                                           |
+| --------------------------------------- | ----------------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
+| **0 — Validation harness**              | Make it possible to _prove_ anything                                    | `2d4a7d4`                       | Playwright bootstrapped in Docker; gated live-AI smoke test armed                |
+| **1 — Trustworthy core**                | No fabricated data; no deliverable that contradicts its dashboard       | `5e49c5c`, `cc36aeb`            | A-2, A-3, A-4, B-1, B-2, B-3, C-1, C-2, G-2 (+A-1)                               |
+| **2 — Solid operations**                | Bounded, audited, guarded runtime                                       | `32d7a05`, `358c4ed`, `dbad444` | A-5, A-6, C-3–C-8, D-1–D-3, E-1–E-5, F-1, F-2, G-3, H-2, H-5, E-4, H-6 (partial) |
+| **3 — Complete deliverables and truth** | Exports contain what the dashboard promises; docs stop lying            | `908621c`, `fb0b137`            | B-4, B-5, B-7, D-4, E-6, F-3, G-1, H-1, H-3, H-4, H-7, H-8                       |
+| **A — Working offline demo (post-hoc)** | Fixture mode returns grounded, non-fabricated AI so a fresh stack works | `0fe0837`                       | X-8                                                                              |
 
 ---
 
@@ -82,7 +83,7 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 
 Every sprint was gated on a **full suite against a quiescent tree** — no result taken while an agent (or the lead) was mid-edit.
 
-- `python -m pytest` → **626 passed, 14 skipped, 0 failed**
+- `python -m pytest` → **640 passed, 14 skipped, 0 failed**
 - `SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live python -m pytest tests/live` → **14 passed** against the real Anthropic API
 - `ruff check app tests` → clean
 - `black --check app tests alembic` → clean, 225 files
@@ -209,7 +210,7 @@ The one-time per-client acknowledgment gate lives **inside `LLMClient.invoke`**,
 
 `find . -iname "*work*order*"` returns nothing. It is absent from `reference-docs/`. Yet **41 files under `apps/api/app` cite it in code comments** as the specification for the A–F changes. It is the de-facto spec for this codebase and it is not in the repository. It cannot be invented. **This is the single largest risk to whoever maintains this next.**
 
-### 8.5 Fixture-mode AI is non-functional in the running app (X-8) — HIGH, not fixed
+### 8.5 Fixture-mode AI (X-8) — was HIGH/broken; FIXED 2026-07-10 (Sprint A, commit `0fe0837`)
 
 Found by the Playwright agent, confirmed directly against the running container:
 
@@ -218,6 +219,10 @@ mode: fixture | provider: FixtureProvider
 registered fixtures: []
 complete() RAISED KeyError: "No fixture registered for purpose='csf_score'."
 ```
+
+**Fixed in Sprint A.** New `app/ai/fixtures.py` registers a grounded builder per purpose, wired into `_build_provider`'s fixture branch. Every entity in a response is echoed from the payload; every non-entity value is a fixed, visibly `[SIMULATED]` constant — a canned "CrowdStrike covers T1003" answer would have been the C-1 fabrication defect reborn, so it is asserted against, not trusted. The in-container proof is the exact inverse of the repro above: `from_settings` now registers all five purposes and each parses through its own production parser. 14 new tests (`test_x8_fixture_mode.py`); non-vacuity proven by the CSF route 500-ing with a bare provider and 200-ing with the defaults. Consequently **G-3's demo guard now guards a working mode** and **E-5's "Simulated" badge is reachable**. Suite: 640 passed, 14 skipped, 0 failed.
+
+The remaining text of this section is the original diagnosis, kept for the record.
 
 `_build_provider` (`app/ai/llm.py:296-297`) returns a bare `FixtureProvider()`. `FixtureProvider.complete` raises unless someone registered a response for that purpose. **`.register()` is called in 14 test files and zero application files**, and `app/ai/fixtures.py` has never existed on any branch. The suite injects its own canned responses per test; the app never does.
 
@@ -294,8 +299,8 @@ All three are aligned to the Next-14 / React-18 line, the lockfile is regenerate
 
 In priority order.
 
-1. **Make fixture mode work (X-8, §8.5).** _This is now the highest-value item._ It is the `docker compose up` default and every AI call in it returns 500. Register per-purpose canned responses in the application, shaped by `app/ai/schemas.py` so they cannot drift from the prompts. Doing so also unblocks the two e2e spec halves that are currently unreachable (B-3's successful export, E-5's actual "Simulated" badge) — write those at the same time, and G-3's demo guard finally guards something that works.
-2. **Fix the `e2e` CI job, then flip it to blocking.** It needs `NEXTAUTH_URL=http://web:3000` on the web service **in that job only**, and `docker compose run --no-deps` so `web` is not recreated back to the compose default. The five specs pass locally three runs in a row; CI cannot currently run them at all (§6.1). Do not change the compose default.
+1. ~~Make fixture mode work (X-8)~~ **DONE 2026-07-10 (Sprint A, commit `0fe0837`, §8.5).** A fresh `docker compose up` stack now has working, grounded, non-fabricated AI. The two previously-unreachable e2e spec halves (B-3's successful export, E-5's actual "Simulated" badge) are now writable — do that as part of item 2.
+2. **Fix the `e2e` CI job, then flip it to blocking** (Sprint B). It needs `NEXTAUTH_URL=http://web:3000` on the web service **in that job only**, and `docker compose run --no-deps` so `web` is not recreated back to the compose default. The five specs pass locally three runs in a row; CI cannot currently run them at all (§6.1). Do not change the compose default. While here, add the two spec halves X-8 just unblocked.
 3. **Add a sign-in spec against a production build** (§8.6). Today nothing would catch a broken submit handler.
 4. ~~Supply an `ANTHROPIC_API_KEY` and run the live smoke test~~ **DONE 2026-07-09.** It found X-7 on the first real run (§8.1).
 5. ~~Finish H-6~~ **DONE** (§8.2).
@@ -311,7 +316,7 @@ In priority order.
 
 ```bash
 # API
-cd apps/api && python -m pytest            # 625 passed, 8 skipped, 0 failed
+cd apps/api && python -m pytest            # 640 passed, 14 skipped, 0 failed
 python -m ruff check app tests             # clean
 python -m black --check app tests alembic  # clean
 python -m bandit -q -c pyproject.toml -r app   # High: 0
