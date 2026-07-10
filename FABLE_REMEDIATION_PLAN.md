@@ -216,6 +216,7 @@ Surfaced by the audit; these are mine, not the document's.
 | **X-5** | MEDIUM | **`C-1`'s marquee defect does not exist here.** No fabrication fixture. Writing the plan's fix (2) would edit a file that isn't in the tree.                                                                                                                                                                                                                                                                                                                                              |
 | **X-6** | LOW    | **No `.env`; no API key.** Live-mode validation is impossible until supplied. (§0.5) — **RESOLVED**: key supplied 2026-07-09; live lane run; see X-7.                                                                                                                                                                                                                                                                                                                                     |
 | **X-7** | HIGH   | **The outgoing payload block was unlabeled, and Haiku ignored it.** `complete()` sent `json.dumps(payload)` as a bare second text block. `claude-haiku-4-5` — the pinned model for **both** `csf_score` and `mitre_map` — did not connect it to the prompt and replied in prose; `parse_json` raised on char 0. Live production path for two of five jobs. **Structurally invisible to fixture mode, which never builds a request.** Found by the live lane on its first real run. (§F.2) |
+| **X-8** | HIGH   | **Fixture mode is non-functional in the running app.** `_build_provider` (`llm.py:296-297`) returns a bare `FixtureProvider()`; nothing outside the pytest suite ever calls `.register()`. Every Run-AI / extract raises `KeyError: No fixture registered for purpose=...` → 500. `docker compose up` defaults to `SHIELD_LLM_MODE=fixture`, so **a fresh stack has no working AI at all**. Found by the e2e agent; confirmed directly. (§F.3) |
 
 ### F.2 — X-7 in detail: the bug only a real call could find
 
@@ -266,6 +267,53 @@ already ran upstream (E-2/H-6 unaffected).
 **Guard.** `test_outgoing_payload_block_is_labeled` intercepts the SDK client
 offline and asserts the label. Proven non-vacuous: reverted `_frame_payload`,
 watched it go red, restored it.
+
+### F.3 — X-8: fixture mode has never worked in the running app
+
+Surfaced by the Playwright agent while trying to reach the E-5 "Simulated"
+badge. Confirmed directly against the running container:
+
+```
+mode: fixture | provider: FixtureProvider
+registered fixtures: []
+complete() RAISED KeyError: "No fixture registered for purpose='csf_score'."
+```
+
+`_build_provider` returns `FixtureProvider(model=...)` with an empty registry.
+`FixtureProvider.complete` raises unless a caller has registered a response for
+the purpose (or a `"default"`). **`.register()` is called in 14 test files and
+in zero application files.** `git log --diff-filter=AD` confirms
+`app/ai/fixtures.py` has never existed on any branch.
+
+So the pytest suite injects its own canned responses per test, and the
+application never does. Fixture mode works in the suite and 500s in the app.
+
+**This reframes three earlier conclusions:**
+
+1. **C-1 / X-5.** The document described a fabrication fixture returning
+   CrowdStrike / Splunk / Okta. I recorded that it "does not exist here." That
+   was correct but incomplete: it does not exist _anywhere_, and its absence is
+   not a fix — it is why the mode is dead. The document was describing a system
+   that had fixture data; this one never did.
+2. **G-3.** The demo guard refuses to boot `ENVIRONMENT=production` with
+   `SHIELD_LLM_MODE=fixture` unless `SHIELD_DEMO=1`. It is guarding a mode that
+   returns 500 on every AI call. The guard is still right; the thing it guards
+   is broken.
+3. **E-5.** The "Simulated" badge renders only after a successful fixture run
+   (`CsfPlaybookPanel.tsx:303`), so it is **unreachable**. Only the AI-status
+   banner half of E-5 is verifiable, and that is what the e2e spec asserts.
+
+**Blast radius.** `docker compose up` sets `SHIELD_LLM_MODE=fixture` by default.
+Every Run-AI button, and Tech-Debt extract, returns 500 on a fresh stack. Anyone
+evaluating this platform without an API key sees an app whose central feature
+does not work. Not a regression from this engagement — it predates it, and no
+test could see it because every test registers its own fixtures first.
+
+**Not fixed here.** The fix is to register per-purpose canned responses in the
+application (shaped by `app/ai/schemas.py`, so they cannot drift from the
+prompts), which is new feature work, not remediation of a listed fix. It is the
+top item of the recommended next sprint. Deliberately **not** bundled into the
+e2e commit.
 
 ---
 
