@@ -1,6 +1,6 @@
 # SHIELD Remediation — Handoff
 
-**Branch:** `remediation/fable-plan` (9 commits, **not pushed**)
+**Branch:** `remediation/fable-plan` (11 commits, **not pushed**)
 **Base:** `main` @ `474729d`
 **Date:** 2026-07-09
 **Source document:** `SHIELD_Remediation_Plan_2.docx` (Revision 3) — 45 fixes across 8 workstreams
@@ -23,7 +23,7 @@ All three sprints are complete. **44 of the document's 45 fixes are addressed an
 | `bandit` HIGH       | 0                  | 0                                          |
 | Alembic head        | `0028`             | `0035` (7 additive, reversible migrations) |
 
-**156 files changed, +12,444 / −1,289.** 26 new test files. Nothing pushed to a remote.
+**160 files changed, +13,139 / −1,294.** 26 new test files. Nothing pushed to a remote.
 
 > **The most important number is not 619.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
 
@@ -57,20 +57,20 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 
 ## 4. Files changed (by area)
 
-| Area                                           | What changed                                                                                                                                                                         |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `apps/api/app/ai/`                             | Boot-time SDK guard; per-job model + `max_tokens`; `schemas.py` (shared response shapes); autonomous `llm_calls` session; typed 504; `preview_job_payload()`                         |
-| `apps/api/app/routes/`                         | All five run-ai call sites; chunking; export gates; target resolution; advisory locks; open-draft guards; evidence tenant checks; risk governance; `/admin/audit`; `/admin/ai-usage` |
-| `apps/api/app/db/`                             | `locks.py` (NullPool advisory lock); autonomous session helper                                                                                                                       |
-| `apps/api/app/models/`                         | `csf_dimension_scores.scored_at`; `llm_calls.client_id`; `risk_registers` unique constraint; `risk_entries.locked/deleted_at`; ZT/ATT&CK narrative columns; `CsfActionItem`          |
-| `apps/api/app/{csf,zt,attack,risk,tech_debt}/` | Exporters (full gap lists, roadmap, 5×5 matrix, Action Plan); parsers (multi-sheet, tolerant numerics); storage timeouts                                                             |
-| `apps/api/app/middleware/`                     | `ratelimit.py` (Redis fixed-window, fails open, off by default)                                                                                                                      |
-| `apps/web/src/`                                | Client detail pages; admin `ClientSwitcher`; real error messages; `AbortSignal` + Cancel; Simulated badge; Active Work; audit viewer; `/dev` auth gate                               |
-| `alembic/versions/`                            | `0029`–`0035`, all additive and reversible                                                                                                                                           |
-| `infra/backup/`, `docs/runbooks/`              | `backup.sh`, `restore.sh`, `restore-drill.sh`, `backup-restore.md`                                                                                                                   |
-| `e2e/`                                         | Playwright config + smoke spec, running in Docker                                                                                                                                    |
-| `.github/workflows/ci.yml`                     | e2e job; restore-drill job                                                                                                                                                           |
-| Docs                                           | `architecture.md`, `operations.md`, `README.md`, `BUILD_REPORT.md`, `CHANGELOG.md`, `DECISIONS.md` (D-016 renumber, D-017 added)                                                     |
+| Area                                           | What changed                                                                                                                                                                                                                                                         |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/api/app/ai/`                             | Boot-time SDK guard; per-job model + `max_tokens`; per-model output ceilings (`max_output_tokens`); `schemas.py` (shared response shapes); autonomous `llm_calls` session; typed 504; `preview_job_payload()` / `preview_job_chunks()`; the H-6 live-egress ack gate |
+| `apps/api/app/routes/`                         | All five run-ai call sites; chunking; export gates; target resolution; advisory locks; open-draft guards; evidence tenant checks; risk governance; `/admin/audit`; `/admin/ai-usage`                                                                                 |
+| `apps/api/app/db/`                             | `locks.py` (NullPool advisory lock); autonomous session helper                                                                                                                                                                                                       |
+| `apps/api/app/models/`                         | `csf_dimension_scores.scored_at`; `llm_calls.client_id`; `risk_registers` unique constraint; `risk_entries.locked/deleted_at`; ZT/ATT&CK narrative columns; `CsfActionItem`; `client.redaction_preview_ack_*`                                                        |
+| `apps/api/app/{csf,zt,attack,risk,tech_debt}/` | Exporters (full gap lists, roadmap, 5×5 matrix, Action Plan); parsers (multi-sheet, tolerant numerics); storage timeouts                                                                                                                                             |
+| `apps/api/app/middleware/`                     | `ratelimit.py` (Redis fixed-window, fails open, off by default)                                                                                                                                                                                                      |
+| `apps/web/src/`                                | Client detail pages; admin `ClientSwitcher`; real error messages; `AbortSignal` + Cancel; Simulated badge; Active Work; audit viewer; `/dev` auth gate                                                                                                               |
+| `alembic/versions/`                            | `0029`–`0035`, all additive and reversible                                                                                                                                                                                                                           |
+| `infra/backup/`, `docs/runbooks/`              | `backup.sh`, `restore.sh`, `restore-drill.sh`, `backup-restore.md`                                                                                                                                                                                                   |
+| `e2e/`                                         | Playwright config + smoke spec, running in Docker                                                                                                                                                                                                                    |
+| `.github/workflows/ci.yml`                     | e2e job; restore-drill job                                                                                                                                                                                                                                           |
+| Docs                                           | `architecture.md`, `operations.md`, `README.md`, `BUILD_REPORT.md`, `CHANGELOG.md`, `DECISIONS.md` (D-016 renumber, D-017 added)                                                                                                                                     |
 
 ---
 
@@ -145,6 +145,13 @@ SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live ANTHROPIC_API_KEY=sk-... \
 ```
 
 The 8 skipped tests become 8 real calls. The gate was verified to arm correctly with a dummy key.
+
+> **Expect the first live Run AI through the app to return 409 — that is the fix working, not a bug.** H-6's acknowledgment gate refuses live egress for a tenant whose redacted payload nobody has reviewed. Before the first live run for a client:
+>
+> 1. `POST /{csf,zt,attack}/services/{id}/run-ai?preview=true` — inspect the redacted payload and the per-rule removal counts.
+> 2. `POST /admin/clients/{client_id}/redaction-preview-ack` — record that a human looked.
+>
+> Once per client, not per run. `tests/live` bypasses this deliberately: it constructs the provider directly rather than going through `LLMClient.invoke`, so it exercises the wire without needing an ack.
 
 ### 8.2 H-6 — CLOSED (was partial; completed after sprint close)
 
@@ -249,4 +256,4 @@ docker compose --profile test run --rm playwright   # 3 passed
 docker compose up -d db minio && bash infra/backup/restore-drill.sh
 ```
 
-Nothing has been pushed. `git log main..HEAD` shows 9 commits.
+Nothing has been pushed. `git log main..HEAD` shows 11 commits.
