@@ -1,6 +1,6 @@
 # SHIELD Remediation — Handoff
 
-**Branch:** `remediation/fable-plan` (11 commits, **not pushed**)
+**Branch:** `remediation/fable-plan` (13 commits, **not pushed**)
 **Base:** `main` @ `474729d`
 **Date:** 2026-07-09
 **Source document:** `SHIELD_Remediation_Plan_2.docx` (Revision 3) — 45 fixes across 8 workstreams
@@ -14,7 +14,8 @@ All three sprints are complete. **44 of the document's 45 fixes are addressed an
 
 |                     | Before             | After                                      |
 | ------------------- | ------------------ | ------------------------------------------ |
-| API tests           | 480 passed         | **625 passed, 8 skipped, 0 failed**        |
+| API tests           | 480 passed         | **626 passed, 14 skipped, 0 failed**       |
+| Live AI (real API)  | never run          | **14 passed** — 5/5 job prompts (§8.1)     |
 | Web tests           | 0                  | e2e harness (Playwright, in Docker)        |
 | `prettier --check`  | **17 files dirty** | clean repo-wide                            |
 | `next lint`         | **crashed**        | `✔ No ESLint warnings or errors`           |
@@ -23,9 +24,11 @@ All three sprints are complete. **44 of the document's 45 fixes are addressed an
 | `bandit` HIGH       | 0                  | 0                                          |
 | Alembic head        | `0028`             | `0035` (7 additive, reversible migrations) |
 
-**160 files changed, +13,139 / −1,294.** 26 new test files. Nothing pushed to a remote.
+**160 files changed, +13,430 / −1,296.** 26 new test files. Nothing pushed to a remote.
 
-> **The most important number is not 619.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
+> **The most important number is not 626.** It is that **every new regression test was proven to fail against the un-fixed code.** A test that passes whether or not the bug is present is a false guarantee, and this repository already contained one: `test_llm_client.py` committed the transaction by hand to "prove" a durability property production did not have.
+>
+> The live lane is the sharpest illustration. It was scaffolded in Sprint 0 and skipped for the entire engagement. The moment a real key armed it, it found a live-mode defect in two of the five AI jobs (§8.1) that the 626 offline tests were structurally unable to see. **Green offline is not evidence that the real path works.**
 
 ---
 
@@ -78,7 +81,8 @@ All implementation ran on **Opus** with narrow scope, disjoint file ownership, e
 
 Every sprint was gated on a **full suite against a quiescent tree** — no result taken while an agent (or the lead) was mid-edit.
 
-- `python -m pytest` → **625 passed, 8 skipped, 0 failed**
+- `python -m pytest` → **626 passed, 14 skipped, 0 failed**
+- `SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live python -m pytest tests/live` → **14 passed** against the real Anthropic API
 - `ruff check app tests` → clean
 - `black --check app tests alembic` → clean, 225 files
 - `bandit -c pyproject.toml -r app` → **High: 0** (2 pre-existing Mediums, reduced to 1)
@@ -89,7 +93,7 @@ Every sprint was gated on a **full suite against a quiescent tree** — no resul
 - `pnpm -F web lint` → `✔ No ESLint warnings or errors`
 - `pnpm install --frozen-lockfile` → exit 0
 
-**The 8 skips are the gated live-AI smoke tests.** They are not failures. See §8.
+**The 14 skips are the gated live-AI smoke tests**, which skip without a key by design. They are not failures — and when armed with a real key they pass 14/14, having first caught a real bug. See §8.1.
 
 ---
 
@@ -128,23 +132,40 @@ Finding 7 was caught by a subagent correcting **this plan** — I had recorded t
 
 ## 8. Issues still open
 
-### 8.1 Live AI is unproven against the real API
+### 8.1 Live AI — VALIDATED 2026-07-09 (commit `16b5da5`), and it found a bug
 
-**No `ANTHROPIC_API_KEY` exists on this machine, and no live Claude call has been made.** I will not claim otherwise.
+A real key was supplied and the live lane ran for the first time. **It found a production defect in the AI path that 626 green offline tests could not see.** Full write-up: `FABLE_REMEDIATION_PLAN.md` §F.2 (Finding X-7).
 
-What _is_ proven:
+`AnthropicProvider.complete` sends the prompt and the payload as two separate text blocks. The payload block was a bare `json.dumps(payload)` — no label. `claude-haiku-4-5` did not connect it to a prompt that says "from the supplied interview answers" and answered in prose — _"I don't see the assessment data in your message"_ — which `parse_json` cannot parse. **`csf_score` and `mitre_map` are both pinned to Haiku**, so that was live production for two of the five jobs.
 
-- **Structurally** — the A-6 contract tests assert that every key the route consumes is declared in the shape the prompt interpolates. Restoring the original CSF prompt shape yields `AssertionError: route reads data['scores']`; restoring the risk display labels yields `'very_low' is a valid enum token but the prompt never offers it`. Those are the two defects that shipped to production against a green suite.
-- **Behaviourally** — fixture-mode Playwright drives the real HTTP path.
+Confirmed by isolating the variable, not by inference:
 
-To arm the live path: put a key in `.env`, then
+| Model              | Payload block | Result                          |
+| ------------------ | ------------- | ------------------------------- |
+| `claude-haiku-4-5` | bare          | **PARSE FAIL** — prose, no JSON |
+| `claude-haiku-4-5` | labeled       | parsed, 1 score row             |
+| `claude-sonnet-5`  | bare          | parsed, 1 score row             |
+
+Fixed in `_frame_payload()` (`app/ai/llm.py`) — one labeled line in the single blessed egress path, so a job written next month inherits it instead of five prompts each having to remember. Guarded offline by `test_outgoing_payload_block_is_labeled`, which was proven non-vacuous by reverting the fix and watching it go red.
+
+**Fixture mode was structurally incapable of catching this: it never builds a request.** Same lesson as A-6, one layer lower.
+
+Now proven live — 5/5 job prompts, real API, each reply parsed by its own production parser:
+
+- `tech_debt_extract`, `csf_score`, `zt_score`, `mitre_map`, `risk_synthesize`.
+- **A-4 re-verified against a real model**, not a fixture: `risk_synthesize` returns `likelihood` / `impact` / `recommended_action` tokens that construct cleanly as the real `StrEnum` members.
+- Token accounting survives, so H-5's per-tenant cost report rests on real numbers.
+
+Re-run it with:
 
 ```bash
 SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live ANTHROPIC_API_KEY=sk-... \
-  python -m pytest tests/live -v
+  python -m pytest tests/live -v      # 14 passed
 ```
 
-The 8 skipped tests become 8 real calls. The gate was verified to arm correctly with a dummy key.
+**Still not proven, and not claimed.** `tests/live` constructs `AnthropicProvider` directly, bypassing `LLMClient.invoke` — and with it redaction, the `llm_calls` audit row, and the H-6 gate. A live run _through the app routes_ has not been done.
+
+> ⚠️ **Rotate the `ANTHROPIC_API_KEY` used for this run.** It was pasted into two git-tracked files (`.env.example`, `.gitignore`) before being moved to the gitignored `.env`, and its full value was printed to a terminal by a `git diff`. It never reached a commit — verified: no tracked file contains the Anthropic key prefix, and the key appears nowhere in git history — but treat it as exposed.
 
 > **Expect the first live Run AI through the app to return 409 — that is the fix working, not a bug.** H-6's acknowledgment gate refuses live egress for a tenant whose redacted payload nobody has reviewed. Before the first live run for a client:
 >

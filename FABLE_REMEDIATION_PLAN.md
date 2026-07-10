@@ -207,14 +207,65 @@ Every fix from the source document, with its **verified** status. `→` marks a 
 
 Surfaced by the audit; these are mine, not the document's.
 
-| ID      | Sev    | Finding                                                                                                                                                                                                                   |
-| ------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **X-1** | HIGH   | **Haiku's 64K output cap collides with `max_tokens=128000`.** Routing `mitre_map` to `claude-haiku-4-5` (Section 8 decision) before A-3 chunking lands will 400 or truncate. **A-3 must precede the model split.** (§0.6) |
-| **X-2** | HIGH   | **No e2e harness exists at all.** Plan steps that say "extend the e2e spec" have nothing to extend. Bootstrapping Playwright is a prerequisite, not a sub-task. (§0.4)                                                    |
-| **X-3** | MEDIUM | **`E-3`'s premise is inverted.** The plan says to copy CSF's open-draft guard to ZT/ATT&CK. **CSF has no such guard.** All three must be written.                                                                         |
-| **X-4** | MEDIUM | **`B-6` is already implemented.** Acting on the document verbatim would have produced a redundant, conflict-prone rewrite of `tech_debt/exporters.py`.                                                                    |
-| **X-5** | MEDIUM | **`C-1`'s marquee defect does not exist here.** No fabrication fixture. Writing the plan's fix (2) would edit a file that isn't in the tree.                                                                              |
-| **X-6** | LOW    | **No `.env`; no API key.** Live-mode validation is impossible until supplied. (§0.5)                                                                                                                                      |
+| ID      | Sev    | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **X-1** | HIGH   | **Haiku's 64K output cap collides with `max_tokens=128000`.** Routing `mitre_map` to `claude-haiku-4-5` (Section 8 decision) before A-3 chunking lands will 400 or truncate. **A-3 must precede the model split.** (§0.6)                                                                                                                                                                                                                                                                 |
+| **X-2** | HIGH   | **No e2e harness exists at all.** Plan steps that say "extend the e2e spec" have nothing to extend. Bootstrapping Playwright is a prerequisite, not a sub-task. (§0.4)                                                                                                                                                                                                                                                                                                                    |
+| **X-3** | MEDIUM | **`E-3`'s premise is inverted.** The plan says to copy CSF's open-draft guard to ZT/ATT&CK. **CSF has no such guard.** All three must be written.                                                                                                                                                                                                                                                                                                                                         |
+| **X-4** | MEDIUM | **`B-6` is already implemented.** Acting on the document verbatim would have produced a redundant, conflict-prone rewrite of `tech_debt/exporters.py`.                                                                                                                                                                                                                                                                                                                                    |
+| **X-5** | MEDIUM | **`C-1`'s marquee defect does not exist here.** No fabrication fixture. Writing the plan's fix (2) would edit a file that isn't in the tree.                                                                                                                                                                                                                                                                                                                                              |
+| **X-6** | LOW    | **No `.env`; no API key.** Live-mode validation is impossible until supplied. (§0.5) — **RESOLVED**: key supplied 2026-07-09; live lane run; see X-7.                                                                                                                                                                                                                                                                                                                                     |
+| **X-7** | HIGH   | **The outgoing payload block was unlabeled, and Haiku ignored it.** `complete()` sent `json.dumps(payload)` as a bare second text block. `claude-haiku-4-5` — the pinned model for **both** `csf_score` and `mitre_map` — did not connect it to the prompt and replied in prose; `parse_json` raised on char 0. Live production path for two of five jobs. **Structurally invisible to fixture mode, which never builds a request.** Found by the live lane on its first real run. (§F.2) |
+
+### F.2 — X-7 in detail: the bug only a real call could find
+
+The source document assumed live mode worked and asked only for a smoke test to
+confirm it. The smoke test did not confirm it. It found this.
+
+`AnthropicProvider.complete` sends two text blocks: the prompt, then the
+payload. The payload block was `json.dumps(payload)` — no label, no framing.
+Sonnet infers the relationship. Haiku does not. Asked to score a CSF assessment
+"from the supplied interview answers", with the answers sitting unlabeled in
+block two, `claude-haiku-4-5` replied:
+
+> _"I'm ready to assist with NIST CSF 2.0 assessment scoring. However, I don't
+> see the assessment data in your message. Please provide..."_
+
+`parse_json` then raised `JSONDecodeError: Expecting value: line 1 column 1`.
+
+**Confirmed, not inferred.** Same prompt, same payload, one variable changed:
+
+| Model              | Payload block | Result                          |
+| ------------------ | ------------- | ------------------------------- |
+| `claude-haiku-4-5` | bare          | **PARSE FAIL** — prose, no JSON |
+| `claude-haiku-4-5` | labeled       | parsed, 1 score row             |
+| `claude-sonnet-5`  | bare          | parsed, 1 score row             |
+
+**Blast radius.** `csf_score` and `mitre_map` are the two Haiku-pinned jobs
+(A-3's model split). Both took this path in live mode. It is a _loud_ failure —
+the route raises rather than silently returning nothing — which is the good
+version of this bug. The silent version is what A-2 and A-4 were about.
+
+**Why the suite was blind to it.** Fixture mode intercepts at the provider
+boundary; it never assembles a request, so no offline test can observe how the
+payload is framed on the wire. 626 green offline tests had nothing to say. This
+is the same lesson as A-6, one layer lower: fixture-green proves the route can
+parse a string the test itself wrote.
+
+**Corroboration.** `app/tech_debt/extract.py:_parse_response` already carried a
+retry with the comment _"Some providers wrap the JSON in prose despite the
+instruction."_ Somebody hit this before, on the one job whose parser they owned,
+and patched locally. The other four jobs share `parse_json`, which has no such
+tolerance. The fix belongs where the request is built, not in five parsers.
+
+**Fix.** `_frame_payload()` in `app/ai/llm.py` — one labeled line, applied in
+the single blessed egress path, so a job written tomorrow inherits it. The label
+is static text carrying no client data, so it cannot defeat the redactor that
+already ran upstream (E-2/H-6 unaffected).
+
+**Guard.** `test_outgoing_payload_block_is_labeled` intercepts the SDK client
+offline and asserts the label. Proven non-vacuous: reverted `_frame_payload`,
+watched it go red, restored it.
 
 ---
 
@@ -735,10 +786,61 @@ All three are now aligned to the Next-14 / React-18 line, `pnpm-lock.yaml` regen
 
 Each bump looks innocuous in a PR diff — a version number, and the Python suite stays green because it never touches the web tier. The failures surface only when something actually _runs_ the app. That is the same structural lesson as the code defects: **the suite was green because nothing exercised the real path.** The plan's own Deferred Backlog says the framework-majors bundle (Next 15/16, React 19, Tailwind 4) must be done "as one e2e-netted pass after the fix sprints, never during them." Pieces of it were merged early, without the net. The Sprint 0 harness is that net, and it is what caught this.
 
+---
+
+### Live-mode validation ✅ PASS — 2026-07-09 (commit `16b5da5`)
+
+A real `ANTHROPIC_API_KEY` was supplied, closing X-6 and arming the lane built in
+Sprint 0 (A0-4). **The first real run found a production bug: X-7.** See §F.2.
+
+The lane as originally scaffolded could not have found it. It made exactly one
+API call, with a toy prompt, and its five "per job" tests were offline registry
+assertions that pass with no key at all. It was rewritten to send **each job's
+actual prompt, to the actual provider, on that job's actual pinned model**, and
+parse each reply with **that job's own production parser**.
+
+Two defects in the scaffold itself, both of which made it lie:
+
+- It passed `{}` as the payload. `complete` sends the payload as its own text
+  block, so the model saw a bare `{}` and echoed it: the reply was
+  `{"ok": true}{}`. The call had physically **succeeded**; the test went red.
+- It hand-rolled fence-stripping and called `json.loads` directly, rather than
+  the `parse_json` the product ships. **A test that parses more leniently than
+  the product cannot detect a response the product would choke on**, and one
+  that parses differently invents its own failures.
+
+| Command                                                                      | Result                                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live pytest tests/live -v` (pre-fix)    | **2 failed, 12 passed** — `csf_score` prose (X-7); `tech_debt_extract` assertion bug in the test itself |
+| `SHIELD_LIVE_SMOKE=1 SHIELD_LLM_MODE=live pytest tests/live -v` (post-fix)   | **14 passed** — 5/5 job prompts, real API, real parsers                                                 |
+| `python -m pytest tests` (offline, `apps/api`)                               | **626 passed, 14 skipped, 0 failed** (exit 0); baseline 625 + 1 new guard                               |
+| revert `_frame_payload` → `pytest …::test_outgoing_payload_block_is_labeled` | **FAILED** — the guard is not vacuous                                                                   |
+| restore `_frame_payload` → same test                                         | passed                                                                                                  |
+| `ruff check` / `black --check` (3 changed files)                             | clean                                                                                                   |
+
+**What is now proven live, that fixtures never proved:**
+
+- All five job prompts round-trip: `tech_debt_extract`, `csf_score`, `zt_score`,
+  `mitre_map`, `risk_synthesize`.
+- **A-4 verified against a real model.** `risk_synthesize` returns
+  `likelihood` / `impact` / `recommended_action` tokens that construct cleanly as
+  the real `StrEnum` members. A display label (`"Very Low"`) would raise here,
+  exactly as it silently nulled the column in production before A-4.
+- Token accounting survives (`input_tokens` / `output_tokens` non-null), so
+  H-5's per-tenant cost report rests on real numbers.
+- The per-job model pins are exercised: the Haiku jobs actually ran on Haiku.
+
+**Not proven, and not claimed.** `tests/live` constructs `AnthropicProvider`
+directly, so it bypasses `LLMClient.invoke` — and therefore bypasses redaction,
+the `llm_calls` audit row, and the H-6 acknowledgment gate. A live run _through
+the app routes_ still returns **409 until an admin previews and acknowledges per
+client**. That is H-6 working, not a bug. An end-to-end live run through
+`invoke` remains untested.
+
 **Still open, and not claimed as done:**
 
 1. ~~**H-6 is partial.**~~ **CLOSED 2026-07-09.** The preview is wired to ZT, CSF and ATT&CK — the two chunked jobs preview _every_ chunk, because the union is what egresses and showing only the first would understate it. The one-time per-client acknowledgment gate is implemented **inside `LLMClient.invoke`**, the codebase's own declared "ONLY path that calls an external AI provider", so every job is covered including ones written after the gate. It runs before the RUNNING audit row is committed and before `provider.complete`: nothing leaves, and nothing is recorded as having tried to. Fixture mode is exempt by construction. Migration `0035`.
-2. **Live AI is unproven against the real API.** No `ANTHROPIC_API_KEY`. The gated live smoke test arms the moment a key exists. No live Claude call has been made and none is claimed.
+2. ~~**Live AI is unproven against the real API.**~~ **CLOSED 2026-07-09.** A key was supplied and the live lane ran. See §E — Live-mode validation. It found **X-7** on its first real run: two of five jobs were broken in live mode. Both are fixed and re-verified against the real API.
 3. **`PublicHeader` makes a server-side `/intake` fetch on every authenticated non-admin render.** Guarded and fails closed, but it deserves caching.
 4. **The v2 Work Order does not exist in the repository.** `find . -iname "*work*order*"` returns nothing, yet **41 files under `apps/api/app` cite it** as the spec for the A–F changes. It cannot be invented, and it is a real risk to the next maintainer.
 
